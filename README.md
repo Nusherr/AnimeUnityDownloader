@@ -4,6 +4,37 @@
 
 ![Demo](https://github.com/Lysagxra/AnimeUnityDownloader/blob/8e274bdfb71f8fc714fa02322ec2b3eda61cce53/assets/demo.png)
 
+---
+
+## App per macOS (interfaccia grafica)
+
+Questo repository include anche **AnimeUnity Downloader.app**, un'applicazione
+nativa per macOS che espone tutte le funzionalità dello strumento senza usare il
+terminale: interfaccia in stile Apple, download singoli e in batch, intervalli e
+liste di episodi, avanzamento con velocità e tempo rimanente, ripresa automatica
+dei download interrotti, notifiche di sistema e indicatore nella barra dei menu.
+
+### Uso (utente finale)
+
+Scarica il file **`AnimeUnity-Downloader.dmg`** dalla sezione
+[Releases](../../releases), aprilo e trascina l'app in *Applicazioni*. Non serve
+installare Python né altre dipendenze: sono già incluse nell'app. Al primo avvio,
+se macOS mostra "sviluppatore non identificato", fai **clic destro sull'app →
+Apri**.
+
+### Compilazione (sviluppatori)
+
+L'interfaccia vive in `gui.py` + `gui_page.html` (server locale + WKWebView); il
+guscio nativo è in `macos_app/main.swift`. Per ricompilare l'app di sviluppo:
+`macos_app/build.sh`. Per generare il pacchetto autosufficiente e il DMG:
+`macos_app/make_dist.sh` (richiede connessione internet, solo Apple Silicon).
+
+L'app grafica e l'impacchettamento macOS sono un'estensione costruita sopra il
+progetto originale di [Lysagxra](https://github.com/Lysagxra/AnimeUnityDownloader),
+distribuita sotto la stessa licenza GPL-3.0.
+
+---
+
 ## Features
 
 - Downloads multiple episodes concurrently.
