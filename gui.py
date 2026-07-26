@@ -51,6 +51,7 @@ try:
     from ytdlp_downloads import (
         QUALITY_LABELS,
         fetch_title,
+        list_formats,
         run_ytdlp_download,
         ytdlp_available,
     )
@@ -60,6 +61,9 @@ except Exception:  # noqa: BLE001
 
     def ytdlp_available() -> bool:
         return False
+
+    def list_formats(url: str) -> str:  # noqa: ARG001
+        return ""
 
     class YtdlpCancelled(Exception):
         pass
@@ -471,39 +475,36 @@ def download_one_anime(
 
 
 # ================================================= "Altri siti" (yt-dlp)
-def download_other_site(
+def _safe_listdir(folder: Path) -> set:
+    """Elenca i file di una cartella senza mai sollevare eccezioni."""
+    try:
+        return set(folder.iterdir())
+    except OSError:
+        return set()
+
+
+def _download_one_url(
     url: str,
-    quality: str,
+    options: dict,
+    base: Path,
     state: AppState,
     cancel: threading.Event,
-    custom_path: str | None = None,
-) -> None:
-    """Scarica un video da un sito generico tramite yt-dlp (scheda "Altri siti").
-
-    Riusa lo stesso stato/interfaccia dei download di AnimeUnity, così le barre
-    di avanzamento hanno un aspetto identico.
-    """
-    quality_label = QUALITY_LABELS.get(quality, quality)
+) -> str:
+    """Scarica un singolo link (che può essere una playlist). Ritorna il titolo."""
+    quality_label = QUALITY_LABELS.get(options.get("quality", "best"), "")
     state.log(f"Recupero informazioni da {url} …")
-
-    base = Path(custom_path or DEFAULT_BASE) / "Downloads"
-    base.mkdir(parents=True, exist_ok=True)
-
     title = fetch_title(url) or url
     if cancel.is_set():
         raise DownloadCancelled
 
     with state.lock:
-        state.manual_progress = True
         state.overall = {"label": title, "total": 1, "done": 0}
         state.tasks = {0: {"desc": quality_label, "pct": 0.0, "visible": True}}
         state.speed_bps = 0.0
         state.bytes_now = 0
-        state.download_path = None
     state.log(f"Titolo: {title} — qualità: {quality_label}")
-    state.log(f"Cartella di destinazione: {base}")
 
-    def on_progress(downloaded: float, total: float, speed: float, eta) -> None:  # noqa: ARG001
+    def on_progress(downloaded, total, speed, eta) -> None:  # noqa: ARG001
         pct = (100 * downloaded / total) if total else 0.0
         with state.lock:
             state.tasks[0]["pct"] = min(pct, 100.0)
@@ -514,32 +515,69 @@ def download_other_site(
         with state.lock:
             state.tasks[0]["desc"] = f"{quality_label} · {text}"
 
+    def on_playlist(index: int, count: int) -> None:
+        with state.lock:
+            state.overall["label"] = f"{title} — elemento {index} di {count}"
+            state.overall["total"] = count
+            state.overall["done"] = index - 1
+            state.tasks[0]["pct"] = 0.0
+
     try:
         run_ytdlp_download(
-            url, quality, str(base), cancel,
-            on_progress, on_stage, state.log,
+            url, options, str(base), cancel,
+            on_progress, on_stage, on_playlist, state.log,
         )
     except YtdlpCancelled as exc:
         raise DownloadCancelled from exc
+    return title
+
+
+def download_other_site(
+    raw_urls: str,
+    options: dict,
+    state: AppState,
+    cancel: threading.Event,
+    custom_path: str | None = None,
+) -> None:
+    """Scarica uno o più link da siti generici tramite yt-dlp ("Altri siti").
+
+    Riusa lo stesso stato/interfaccia dei download di AnimeUnity, così le barre
+    di avanzamento hanno un aspetto identico.
+    """
+    base = Path(custom_path or DEFAULT_BASE) / "Downloads"
+    base.mkdir(parents=True, exist_ok=True)
+    state.log(f"Cartella di destinazione: {base}")
+
+    urls = [u.strip() for u in raw_urls.splitlines() if u.strip()]
+    with state.lock:
+        state.manual_progress = True
+        state.download_path = None
+    try:
+        for indx, url in enumerate(urls, start=1):
+            if cancel.is_set():
+                raise DownloadCancelled
+            if len(urls) > 1:
+                state.log(f"— Link {indx}/{len(urls)} —")
+            before = _safe_listdir(base)
+            title = _download_one_url(url, options, base, state, cancel)
+
+            with state.lock:
+                state.tasks[0]["pct"] = 100.0
+                state.overall["done"] = state.overall.get("total", 1)
+                new_files = [f for f in _safe_listdir(base) if f not in before]
+                size = sum(
+                    f.stat().st_size for f in new_files
+                    if f.is_file() and f.exists()
+                )
+                state.completed.append({
+                    "label": title, "path": str(base), "size": size,
+                })
+            state.log(f"✅ Download di \"{title}\" completato.")
+            if not os.environ.get("GUI_NO_BROWSER"):
+                notify(title)
     finally:
         with state.lock:
             state.manual_progress = False
-
-    with state.lock:
-        state.tasks[0]["pct"] = 100.0
-        state.overall["done"] = 1
-        newest = max(
-            (f for f in base.iterdir() if f.is_file()),
-            key=lambda f: f.stat().st_mtime, default=None,
-        )
-        state.completed.append({
-            "label": title,
-            "path": str(base),
-            "size": newest.stat().st_size if newest else 0,
-        })
-    state.log(f"✅ Download di \"{title}\" completato.")
-    if not os.environ.get("GUI_NO_BROWSER"):
-        notify(title)
 
 
 def start_job(job) -> str | None:
@@ -639,6 +677,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_batch(data))
             elif path == "/ytdlp":
                 self._json(self._handle_ytdlp(data))
+            elif path == "/ytdlp_formats":
+                self._json(self._handle_ytdlp_formats(data))
             elif path == "/cancel":
                 if STATE.running:
                     STATE.cancel.set()
@@ -749,19 +789,31 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_ytdlp(self, data: dict) -> dict:
         if not ytdlp_available():
             return {"error": "La funzione \"Altri siti\" non è disponibile."}
-        url = str(data.get("url", "")).strip()
-        if not url:
+        raw_urls = str(data.get("url", "")).strip()
+        if not raw_urls:
             return {"error": "Inserisci un link da scaricare."}
-        if not url.startswith(("http://", "https://")):
+        first = raw_urls.splitlines()[0].strip()
+        if not first.startswith(("http://", "https://")):
             return {"error": "Il link deve iniziare con http:// o https://"}
-        quality = str(data.get("quality", "best"))
-        if quality not in QUALITY_LABELS:
-            quality = "best"
+
+        options = dict(data.get("options") or {})
+        options["quality"] = (
+            data.get("quality") if data.get("quality") in QUALITY_LABELS else "best"
+        )
         custom_path = str(data.get("path", "")).strip() or DEFAULT_BASE
         error = start_job(lambda cancel: download_other_site(
-            url, quality, STATE, cancel, custom_path=custom_path,
+            raw_urls, options, STATE, cancel, custom_path=custom_path,
         ))
         return {"error": error} if error else {"ok": True}
+
+    def _handle_ytdlp_formats(self, data: dict) -> dict:
+        if not ytdlp_available():
+            return {"error": "Funzione non disponibile."}
+        url = str(data.get("url", "")).strip().splitlines()
+        url = url[0].strip() if url else ""
+        if not url.startswith(("http://", "https://")):
+            return {"error": "Inserisci prima un link valido."}
+        return {"formats": list_formats(url)}
 
 
 def pick_folder() -> str:

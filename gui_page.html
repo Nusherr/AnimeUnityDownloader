@@ -153,6 +153,47 @@
 
   .enter { animation: paneIn .22s cubic-bezier(.3,.8,.3,1); }
   @keyframes paneIn { from { opacity: 0; transform: translateY(5px); } }
+
+  /* --- Pannello opzioni "Altri siti" (fisarmonica) --- */
+  #optPanel { margin-top: 6px; border-top: 0.5px solid var(--sep2); }
+  .acc { border-bottom: 0.5px solid var(--sep2); }
+  .acc-head { display: flex; align-items: center; gap: 7px; width: 100%;
+    background: none; border: none; font-family: inherit; color: var(--text);
+    font-size: 13px; padding: 11px 2px; cursor: default; text-align: left; }
+  .acc-head .chev { display: inline-block; transition: transform .18s cubic-bezier(.3,.8,.3,1);
+    font-size: 14px; color: var(--text3); }
+  .acc.open .acc-head .chev { transform: rotate(90deg); }
+  .acc-head .badge { margin-left: auto; font-size: 11.5px; color: var(--text3);
+    font-variant-numeric: tabular-nums; }
+  .acc-body { overflow: hidden; max-height: 0; opacity: 0;
+    transition: max-height .3s cubic-bezier(.3,.8,.3,1), opacity .22s; }
+  .acc.open .acc-body { max-height: 900px; opacity: 1; }
+  .acc-inner { padding: 2px 2px 12px; }
+  .opt-row { display: flex; align-items: center; gap: 10px; min-height: 30px; margin-top: 6px; }
+  .opt-row .lbl { font-size: 13px; color: var(--text); flex: 1; }
+  .opt-row.sub { margin-left: 20px; }
+  .opt-row.sub .lbl { color: var(--text2); font-size: 12.5px; }
+  .msel { height: 28px; background: var(--field); color: var(--text);
+    border: 0.5px solid var(--sep); border-radius: 7px; padding: 0 8px;
+    font-family: inherit; font-size: 12.5px; outline: none; }
+  .minput { height: 28px; background: var(--field); color: var(--text);
+    border: 0.5px solid var(--sep); border-radius: 7px; padding: 0 9px;
+    font-family: inherit; font-size: 12.5px; outline: none; }
+  .minput:focus, .msel:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--ring); }
+  .tgl { width: 36px; height: 22px; border-radius: 11px; background: var(--track);
+    position: relative; flex: none; cursor: default; transition: background .2s; }
+  .tgl.on { background: #30d158; }
+  .tgl::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+    border-radius: 50%; background: #fff; transition: left .2s cubic-bezier(.3,.8,.3,1);
+    box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  .tgl.on::after { left: 16px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: 12px; padding: 4px 11px; border-radius: 20px; cursor: default;
+    background: var(--seg); color: var(--text2); border: 0.5px solid transparent; }
+  .chip.on { background: var(--tile-red); color: var(--tile-red-fg);
+    border-color: var(--tile-red-fg); }
+  .grp-lbl { font-size: 11px; color: var(--text3); letter-spacing: .04em; margin: 4px 0; }
+
   .hidden { display: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
@@ -212,6 +253,7 @@
     <div class="field">
       <input id="otherUrl" placeholder="Incolla un link (YouTube, Vimeo, …)" spellcheck="false">
     </div>
+    <textarea id="otherBatch" class="hidden" placeholder="Un link per riga…" spellcheck="false" style="margin-top:10px"></textarea>
     <div class="row">
       <span class="hint">Qualità</span>
       <div class="seg" id="qualitySeg">
@@ -225,7 +267,12 @@
       <span style="flex:1"></span>
       <button class="btn" id="btnOther" onclick="startOther()">Scarica</button>
     </div>
-    <div class="row"><span class="hint2">Il video viene salvato nella cartella qui sotto.</span></div>
+    <div class="row">
+      <button class="link" onclick="showFormats()">Mostra formati disponibili</button>
+      <span class="hint2">·</span>
+      <button id="optToggle" class="link" onclick="toggleOpts()">Opzioni</button>
+    </div>
+    <div id="optPanel" class="hidden"></div>
   </div>
 
   <div class="dest">
@@ -326,7 +373,10 @@ makeSeg('modeSeg', (v) => {
   $('listRow').classList.toggle('open', v === 'list');
 });
 let otherQuality = 'best';
-makeSeg('qualitySeg', (v) => { otherQuality = v; });
+makeSeg('qualitySeg', (v) => {
+  otherQuality = v;
+  if ($('optPanel').children.length) applyShowIf();
+});
 
 async function api(path, body) {
   const resp = await fetch(path, {
@@ -347,8 +397,235 @@ function startSingle() {
   });
 }
 function startBatch() { api('/batch', { urls: $('batchUrls').value, path: customPath }); }
+
+const SB_CATS = [['sponsor','Sponsor'],['selfpromo','Autopromozione'],
+  ['interaction','Richieste like/iscriviti'],['intro','Introduzione'],
+  ['outro','Sigla finale'],['music_offtopic','Musica non pertinente'],['preview','Riassunto/anteprima']];
+
+const OPT = [
+  {t:'Sottotitoli e metadati', f:[
+    {k:'subtitles', type:'toggle', l:'Sottotitoli'},
+    {k:'sub_lang', type:'text', l:'Lingue', def:'it,en', w:130, sub:1, when:s=>s.subtitles},
+    {k:'sub_embed', type:'toggle', l:'Incorpora nel video', sub:1, when:s=>s.subtitles},
+    {k:'thumbnail', type:'toggle', l:'Miniatura di copertina'},
+    {k:'metadata', type:'toggle', l:'Metadati (titolo, autore)'},
+    {k:'chapters', type:'toggle', l:'Capitoli'},
+    {k:'write_description', type:'toggle', l:'Salva la descrizione'},
+    {k:'write_comments', type:'toggle', l:'Salva i commenti'},
+    {k:'write_info', type:'toggle', l:'Salva info tecniche (.json)'},
+  ]},
+  {t:'SponsorBlock', f:[
+    {k:'sponsorblock', type:'seg', l:'Segmenti sponsor', def:'off',
+     opts:[['off','Ignora'],['mark','Segnala'],['remove','Rimuovi']]},
+    {k:'sponsorblock_cats', type:'chips', l:'Categorie', def:['sponsor','selfpromo','interaction'],
+     opts:SB_CATS, when:s=>s.sponsorblock!=='off'},
+  ]},
+  {t:'Audio', when:()=>otherQuality==='audio', f:[
+    {k:'audio_format', type:'seg', l:'Formato', def:'mp3',
+     opts:[['mp3','MP3'],['m4a','M4A'],['opus','Opus'],['flac','FLAC'],['wav','WAV']]},
+    {k:'audio_quality', type:'select', l:'Qualità', def:'best',
+     opts:[['best','Migliore'],['320','320 kbps'],['256','256 kbps'],['192','192 kbps'],['128','128 kbps']]},
+    {k:'keep_original', type:'toggle', l:'Tieni anche il video'},
+  ]},
+  {t:'Video e conversione', when:()=>otherQuality!=='audio', f:[
+    {k:'container', type:'seg', l:'Contenitore', def:'mp4',
+     opts:[['mp4','MP4'],['mkv','MKV'],['original','Originale']]},
+    {k:'recode', type:'toggle', l:'Ricodifica per compatibilità'},
+    {k:'recode_format', type:'select', l:'Formato', def:'mp4', sub:1, when:s=>s.recode,
+     opts:[['mp4','MP4'],['webm','WebM'],['mkv','MKV']]},
+    {k:'split_chapters', type:'toggle', l:'Dividi per capitoli (file separati)'},
+  ]},
+  {t:'Playlist e selezione', f:[
+    {k:'playlist', type:'toggle', l:"Scarica l'intera playlist"},
+    {k:'playlist_items', type:'text', l:'Elementi', ph:'es. 1-5', w:90, sub:1, when:s=>s.playlist},
+    {k:'playlist_reverse', type:'toggle', l:'Ordine inverso', sub:1, when:s=>s.playlist},
+    {k:'date_after', type:'text', l:'Solo dopo', ph:'AAAAMMGG', w:110},
+    {k:'date_before', type:'text', l:'Solo prima', ph:'AAAAMMGG', w:110},
+    {k:'download_archive', type:'toggle', l:'Ricorda i già scaricati (salta i doppioni)'},
+  ]},
+  {t:'Ritaglio e dirette', f:[
+    {k:'time', type:'time', l:'Ritaglio'},
+    {k:'live_from_start', type:'toggle', l:'Dirette: scarica dall\'inizio'},
+  ]},
+  {t:'Nomi e cartelle', f:[
+    {k:'subfolder_channel', type:'toggle', l:'Sottocartella per ogni canale'},
+    {k:'filename_template', type:'text', l:'Schema nome (avanzato)', ph:'%(title)s.%(ext)s', w:180},
+  ]},
+  {t:'Rete e robustezza', f:[
+    {k:'fast', type:'toggle', l:'Download veloce (frammenti paralleli)'},
+    {k:'rate_limit', type:'text', l:'Limite velocità', ph:'MB/s', w:70},
+    {k:'sleep_interval', type:'text', l:'Pausa tra i download', ph:'sec', w:70},
+    {k:'retries', type:'text', l:'Tentativi', ph:'10', w:70},
+    {k:'proxy', type:'text', l:'Proxy', ph:'http://…', w:160},
+    {k:'geo_bypass', type:'toggle', l:'Aggira blocchi geografici'},
+    {k:'cookies_browser', type:'select', l:'Cookie del browser', def:'none',
+     opts:[['none','Nessuno'],['safari','Safari'],['chrome','Chrome'],['firefox','Firefox'],['edge','Edge']]},
+  ]},
+  {t:'Protezione e più link', f:[
+    {k:'video_password', type:'password', l:'Password del video', ph:'facoltativa', w:150},
+    {k:'batch', type:'toggle', l:'Coda più link (uno per riga)'},
+  ]},
+];
+
+const optState = {};
+OPT.forEach(sec => sec.f.forEach(fl => {
+  optState[fl.k] = fl.def !== undefined ? fl.def : (fl.type === 'toggle' ? false : '');
+}));
+
+function esc(s){ const d=document.createElement('span'); d.textContent=s; return d.innerHTML; }
+
+function buildOpts() {
+  const panel = $('optPanel');
+  panel.innerHTML = '';
+  OPT.forEach((sec, si) => {
+    const acc = document.createElement('div');
+    acc.className = 'acc'; acc.dataset.sec = si;
+    if (sec.when) acc.dataset.secwhen = '1';
+    const head = document.createElement('button');
+    head.className = 'acc-head';
+    head.innerHTML = '<span class="chev">›</span><span>' + esc(sec.t) +
+      '</span><span class="badge"></span>';
+    head.onclick = () => acc.classList.toggle('open');
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+    const inner = document.createElement('div');
+    inner.className = 'acc-inner';
+    sec.f.forEach(fl => inner.appendChild(buildField(fl)));
+    body.appendChild(inner); acc.appendChild(head); acc.appendChild(body);
+    panel.appendChild(acc);
+  });
+  applyShowIf();
+}
+
+function buildField(fl) {
+  const row = document.createElement('div');
+  row.className = 'opt-row' + (fl.sub ? ' sub' : '');
+  row.dataset.k = fl.k;
+  const lbl = document.createElement('span');
+  lbl.className = 'lbl'; lbl.textContent = fl.l;
+  const ctrl = document.createElement('span');
+  ctrl.style.cssText = 'display:flex;align-items:center;gap:8px';
+
+  if (fl.type === 'toggle') {
+    const t = document.createElement('span');
+    t.className = 'tgl' + (optState[fl.k] ? ' on' : '');
+    t.onclick = () => { optState[fl.k] = !optState[fl.k];
+      t.classList.toggle('on', optState[fl.k]);
+      if (fl.k === 'batch') applyBatch();
+      applyShowIf(); };
+    row.appendChild(lbl); ctrl.appendChild(t);
+  } else if (fl.type === 'text' || fl.type === 'password') {
+    const i = document.createElement('input');
+    i.className = 'minput'; i.type = fl.type === 'password' ? 'password' : 'text';
+    i.placeholder = fl.ph || ''; i.value = optState[fl.k] || '';
+    if (fl.w) i.style.width = fl.w + 'px';
+    i.oninput = () => { optState[fl.k] = i.value; };
+    row.appendChild(lbl); ctrl.appendChild(i);
+  } else if (fl.type === 'select') {
+    const s = document.createElement('select'); s.className = 'msel';
+    fl.opts.forEach(([v, t]) => { const o = document.createElement('option');
+      o.value = v; o.textContent = t; if (v === optState[fl.k]) o.selected = true; s.appendChild(o); });
+    s.onchange = () => { optState[fl.k] = s.value; };
+    row.appendChild(lbl); ctrl.appendChild(s);
+  } else if (fl.type === 'seg') {
+    const seg = document.createElement('span');
+    seg.style.cssText = 'display:inline-flex;background:var(--seg);border-radius:8px;padding:2px';
+    fl.opts.forEach(([v, t]) => { const b = document.createElement('button');
+      b.textContent = t; b.dataset.v = v;
+      b.style.cssText = 'border:none;background:transparent;font-family:inherit;font-size:12px;padding:3px 10px;border-radius:6px;color:var(--text2);cursor:default';
+      const paint = () => { const on = optState[fl.k] === v;
+        b.style.background = on ? 'var(--segactive)' : 'transparent';
+        b.style.color = on ? 'var(--text)' : 'var(--text2)';
+        b.style.fontWeight = on ? '500' : '400'; };
+      b.onclick = () => { optState[fl.k] = v;
+        [...seg.children].forEach(c => c.dispatchEvent(new Event('paint')));
+        applyShowIf(); };
+      b.addEventListener('paint', paint); paint(); seg.appendChild(b); });
+    row.appendChild(lbl); ctrl.appendChild(seg);
+  } else if (fl.type === 'chips') {
+    row.style.alignItems = 'flex-start';
+    const wrap = document.createElement('span'); wrap.className = 'chips';
+    fl.opts.forEach(([v, t]) => { const c = document.createElement('span');
+      c.className = 'chip' + (optState[fl.k].includes(v) ? ' on' : '');
+      c.textContent = t;
+      c.onclick = () => { const arr = optState[fl.k];
+        const i = arr.indexOf(v); if (i < 0) arr.push(v); else arr.splice(i, 1);
+        c.classList.toggle('on', arr.includes(v)); };
+      wrap.appendChild(c); });
+    lbl.style.paddingTop = '4px'; row.appendChild(lbl); ctrl.appendChild(wrap);
+  } else if (fl.type === 'time') {
+    const mk = (key, ph) => { const i = document.createElement('input');
+      i.className = 'minput'; i.placeholder = ph; i.style.width = '62px';
+      i.value = optState[key] || ''; i.oninput = () => { optState[key] = i.value; }; return i; };
+    row.appendChild(lbl);
+    const da = document.createElement('span'); da.className = 'lbl'; da.style.flex = 'none'; da.textContent = 'da';
+    const a = document.createElement('span'); a.className = 'lbl'; a.style.flex = 'none'; a.textContent = 'a';
+    ctrl.appendChild(da); ctrl.appendChild(mk('time_from', '0:00'));
+    ctrl.appendChild(a); ctrl.appendChild(mk('time_to', 'fine'));
+  }
+  row.appendChild(ctrl);
+  return row;
+}
+
+function applyShowIf() {
+  OPT.forEach((sec, si) => {
+    const acc = $('optPanel').querySelector('.acc[data-sec="' + si + '"]');
+    if (!acc) return;
+    if (sec.when) acc.classList.toggle('hidden', !sec.when(optState));
+    let active = 0;
+    sec.f.forEach(fl => {
+      const row = acc.querySelector('.opt-row[data-k="' + fl.k + '"]');
+      if (!row) return;
+      const shown = !fl.when || fl.when(optState);
+      row.classList.toggle('hidden', !shown);
+      if (!shown) return;  // le opzioni nascoste non contano nel badge
+      const v = optState[fl.k];
+      if ((fl.type === 'toggle' && v) ||
+          ((fl.type === 'text' || fl.type === 'password') && v && v !== (fl.def || '')) ||
+          (fl.type === 'seg' && fl.def && v !== fl.def) ||
+          (fl.type === 'select' && fl.def && v !== fl.def) ||
+          (fl.type === 'chips' && v.length) ||
+          (fl.type === 'time' && (optState.time_from || optState.time_to))) active++;
+    });
+    const badge = acc.querySelector('.badge');
+    if (badge) badge.textContent = active ? active + ' attive' : '';
+  });
+}
+
+function applyBatch() {
+  const on = optState.batch;
+  $('otherUrl').classList.toggle('hidden', on);
+  $('otherBatch').classList.toggle('hidden', !on);
+}
+
+function toggleOpts() {
+  const p = $('optPanel');
+  const open = !p.classList.contains('hidden');
+  p.classList.toggle('hidden', open);
+  $('optToggle').textContent = 'Opzioni';
+}
+
+function collectOptions() {
+  const o = {};
+  Object.keys(optState).forEach(k => {
+    const v = optState[k];
+    if (v !== '' && v !== false && !(Array.isArray(v) && v.length === 0)) o[k] = v;
+  });
+  if (Array.isArray(o.sponsorblock_cats)) o.sponsorblock_cats = o.sponsorblock_cats.join(',');
+  return o;
+}
+
 function startOther() {
-  api('/ytdlp', { url: $('otherUrl').value, quality: otherQuality, path: customPath });
+  const url = optState.batch ? $('otherBatch').value : $('otherUrl').value;
+  api('/ytdlp', { url: url, quality: otherQuality, options: collectOptions(), path: customPath });
+}
+
+async function showFormats() {
+  const url = optState.batch ? $('otherBatch').value : $('otherUrl').value;
+  if (!url.trim()) { alert('Inserisci prima un link.'); return; }
+  if ($('log').style.display !== 'block') toggleLog();
+  const r = await api('/ytdlp_formats', { url: url });
+  if (r.formats) { $('log').textContent = r.formats; $('log').scrollTop = 0; }
 }
 function cancelJob() {
   const pct = Math.round(window.__pct || 0);
@@ -551,6 +828,7 @@ if (native) {
   $('emptySub').textContent += ', oppure premi ⌘N';
 }
 
+buildOpts();
 loadUrls();
 poll();
 setInterval(poll, 600);
