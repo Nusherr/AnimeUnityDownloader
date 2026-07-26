@@ -168,3 +168,6 @@ Downloads/
 URLs.txt
 .DS_Store
 .claude/
+
+# --- Funzione "Altri siti" (yt-dlp) — binari scaricati a parte ---
+tools/

@@ -167,6 +167,7 @@
     <div class="thumb"></div>
     <button data-v="single" class="active">Singolo</button>
     <button data-v="batch">Batch</button>
+    <button data-v="other" id="tabOther" class="hidden">Altri siti</button>
   </div>
 </div>
 <main>
@@ -205,6 +206,26 @@
       <span style="flex:1"></span>
       <button class="btn" id="btnBatch" onclick="startBatch()">Scarica tutti</button>
     </div>
+  </div>
+
+  <div id="paneOther" class="hidden">
+    <div class="field">
+      <input id="otherUrl" placeholder="Incolla un link (YouTube, Vimeo, …)" spellcheck="false">
+    </div>
+    <div class="row">
+      <span class="hint">Qualità</span>
+      <div class="seg" id="qualitySeg">
+        <div class="thumb"></div>
+        <button data-v="best" class="active">Migliore</button>
+        <button data-v="1080">1080p</button>
+        <button data-v="720">720p</button>
+        <button data-v="480">480p</button>
+        <button data-v="audio">Audio</button>
+      </div>
+      <span style="flex:1"></span>
+      <button class="btn" id="btnOther" onclick="startOther()">Scarica</button>
+    </div>
+    <div class="row"><span class="hint2">Il video viene salvato nella cartella qui sotto.</span></div>
   </div>
 
   <div class="dest">
@@ -289,12 +310,13 @@ function makeSeg(id, cb) {
   return ctl;
 }
 
+const PANES = { single: 'paneSingle', batch: 'paneBatch', other: 'paneOther' };
 const tabCtl = makeSeg('tabSeg', (v) => {
-  const showSingle = v === 'single';
-  const to = showSingle ? $('paneSingle') : $('paneBatch');
-  const from = showSingle ? $('paneBatch') : $('paneSingle');
-  if (!to.classList.contains('hidden')) return;
-  from.classList.add('hidden');
+  const to = $(PANES[v]);
+  if (!to || !to.classList.contains('hidden')) return;
+  Object.values(PANES).forEach((id) => {
+    if (id !== PANES[v]) $(id).classList.add('hidden');
+  });
   to.classList.remove('hidden');
   to.classList.remove('enter'); void to.offsetWidth; to.classList.add('enter');
 });
@@ -303,6 +325,8 @@ makeSeg('modeSeg', (v) => {
   $('rangeRow').classList.toggle('open', v === 'range');
   $('listRow').classList.toggle('open', v === 'list');
 });
+let otherQuality = 'best';
+makeSeg('qualitySeg', (v) => { otherQuality = v; });
 
 async function api(path, body) {
   const resp = await fetch(path, {
@@ -323,6 +347,9 @@ function startSingle() {
   });
 }
 function startBatch() { api('/batch', { urls: $('batchUrls').value, path: customPath }); }
+function startOther() {
+  api('/ytdlp', { url: $('otherUrl').value, quality: otherQuality, path: customPath });
+}
 function cancelJob() {
   const pct = Math.round(window.__pct || 0);
   if (pct > 10 && !confirm(
@@ -398,6 +425,8 @@ async function poll() {
 
     window.__running = s.running;
     $('btnBatch').disabled = s.running;
+    $('btnOther').disabled = s.running;
+    if (s.ytdlp) $('tabOther').classList.remove('hidden');
     refreshSingleButton();
 
     if (lastErrorSeq === null) {
@@ -512,6 +541,9 @@ document.addEventListener('drop', (e) => {
 
 $('url').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !$('btnSingle').disabled) startSingle();
+});
+$('otherUrl').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !$('btnOther').disabled) startOther();
 });
 $('url').addEventListener('input', refreshSingleButton);
 refreshSingleButton();

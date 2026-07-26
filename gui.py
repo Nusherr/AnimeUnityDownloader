@@ -44,6 +44,26 @@ from src.download_utils import get_chunk_size, get_episode_filename
 from src.file_utils import create_download_directory
 from src.general_utils import fetch_page, fetch_page_httpx
 
+# --- Funzione opzionale "Altri siti" (yt-dlp), completamente isolata ---
+# Se il modulo o i binari non ci sono, la scheda non compare e AnimeUnity
+# funziona esattamente come prima.
+try:
+    from ytdlp_downloads import (
+        QUALITY_LABELS,
+        fetch_title,
+        run_ytdlp_download,
+        ytdlp_available,
+    )
+    from ytdlp_downloads import _Cancelled as YtdlpCancelled
+except Exception:  # noqa: BLE001
+    QUALITY_LABELS = {}
+
+    def ytdlp_available() -> bool:
+        return False
+
+    class YtdlpCancelled(Exception):
+        pass
+
 PROJECT_DIR = Path(__file__).resolve().parent
 # I video finiscono di default in ~/Downloads (il tool aggiunge "Downloads/<anime>")
 DEFAULT_BASE = str(Path.home())
@@ -74,6 +94,7 @@ class AppState:
         self.bytes_now = 0
         self.last_error: str | None = None
         self.error_seq = 0
+        self.manual_progress = False  # True quando l'avanzamento lo gestisce yt-dlp
         self.last_poll = time.time()
 
     def log(self, message: str) -> None:
@@ -120,6 +141,7 @@ class AppState:
                 "eta_s": eta,
                 "last_error": self.last_error,
                 "error_seq": self.error_seq,
+                "ytdlp": ytdlp_available(),
             }
 
 
@@ -197,6 +219,8 @@ def speed_sampler() -> None:
     while True:
         time.sleep(1.5)
         with STATE.lock:
+            if STATE.manual_progress:
+                continue  # durante yt-dlp l'avanzamento arriva già pronto
             path = STATE.download_path
             running = STATE.running
         if not running or not path:
@@ -446,6 +470,78 @@ def download_one_anime(
         notify(anime_name)
 
 
+# ================================================= "Altri siti" (yt-dlp)
+def download_other_site(
+    url: str,
+    quality: str,
+    state: AppState,
+    cancel: threading.Event,
+    custom_path: str | None = None,
+) -> None:
+    """Scarica un video da un sito generico tramite yt-dlp (scheda "Altri siti").
+
+    Riusa lo stesso stato/interfaccia dei download di AnimeUnity, così le barre
+    di avanzamento hanno un aspetto identico.
+    """
+    quality_label = QUALITY_LABELS.get(quality, quality)
+    state.log(f"Recupero informazioni da {url} …")
+
+    base = Path(custom_path or DEFAULT_BASE) / "Downloads"
+    base.mkdir(parents=True, exist_ok=True)
+
+    title = fetch_title(url) or url
+    if cancel.is_set():
+        raise DownloadCancelled
+
+    with state.lock:
+        state.manual_progress = True
+        state.overall = {"label": title, "total": 1, "done": 0}
+        state.tasks = {0: {"desc": quality_label, "pct": 0.0, "visible": True}}
+        state.speed_bps = 0.0
+        state.bytes_now = 0
+        state.download_path = None
+    state.log(f"Titolo: {title} — qualità: {quality_label}")
+    state.log(f"Cartella di destinazione: {base}")
+
+    def on_progress(downloaded: float, total: float, speed: float, eta) -> None:  # noqa: ARG001
+        pct = (100 * downloaded / total) if total else 0.0
+        with state.lock:
+            state.tasks[0]["pct"] = min(pct, 100.0)
+            state.speed_bps = speed
+            state.bytes_now = int(downloaded)
+
+    def on_stage(text: str) -> None:
+        with state.lock:
+            state.tasks[0]["desc"] = f"{quality_label} · {text}"
+
+    try:
+        run_ytdlp_download(
+            url, quality, str(base), cancel,
+            on_progress, on_stage, state.log,
+        )
+    except YtdlpCancelled as exc:
+        raise DownloadCancelled from exc
+    finally:
+        with state.lock:
+            state.manual_progress = False
+
+    with state.lock:
+        state.tasks[0]["pct"] = 100.0
+        state.overall["done"] = 1
+        newest = max(
+            (f for f in base.iterdir() if f.is_file()),
+            key=lambda f: f.stat().st_mtime, default=None,
+        )
+        state.completed.append({
+            "label": title,
+            "path": str(base),
+            "size": newest.stat().st_size if newest else 0,
+        })
+    state.log(f"✅ Download di \"{title}\" completato.")
+    if not os.environ.get("GUI_NO_BROWSER"):
+        notify(title)
+
+
 def start_job(job) -> str | None:
     """Avvia un job in un thread. Ritorna un messaggio di errore o None."""
     with STATE.lock:
@@ -473,6 +569,7 @@ def start_job(job) -> str | None:
             with STATE.lock:
                 STATE.running = False
                 STATE.download_path = None
+                STATE.manual_progress = False
 
     STATE.worker = threading.Thread(target=runner, daemon=True)
     STATE.worker.start()
@@ -540,6 +637,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_download(data))
             elif path == "/batch":
                 self._json(self._handle_batch(data))
+            elif path == "/ytdlp":
+                self._json(self._handle_ytdlp(data))
             elif path == "/cancel":
                 if STATE.running:
                     STATE.cancel.set()
@@ -645,6 +744,23 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.log(f"⚠️ Errore su {url}: {err}")
 
         error = start_job(job)
+        return {"error": error} if error else {"ok": True}
+
+    def _handle_ytdlp(self, data: dict) -> dict:
+        if not ytdlp_available():
+            return {"error": "La funzione \"Altri siti\" non è disponibile."}
+        url = str(data.get("url", "")).strip()
+        if not url:
+            return {"error": "Inserisci un link da scaricare."}
+        if not url.startswith(("http://", "https://")):
+            return {"error": "Il link deve iniziare con http:// o https://"}
+        quality = str(data.get("quality", "best"))
+        if quality not in QUALITY_LABELS:
+            quality = "best"
+        custom_path = str(data.get("path", "")).strip() or DEFAULT_BASE
+        error = start_job(lambda cancel: download_other_site(
+            url, quality, STATE, cancel, custom_path=custom_path,
+        ))
         return {"error": error} if error else {"ok": True}
 
 
