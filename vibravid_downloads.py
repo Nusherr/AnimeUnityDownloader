@@ -35,6 +35,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Callable
@@ -124,14 +125,30 @@ def _clean_env(**extra: str) -> dict:
 
 # ============================================================== rilevamento
 def vibravid_dir() -> Path:
-    """Cartella di VibraVid (env var ``VIBRAVID_DIR`` o percorso predefinito)."""
+    """Cartella di VibraVid, cercata in ordine di priorità.
+
+    Nel pacchetto distribuibile VibraVid è incluso accanto al codice dell'app;
+    in sviluppo sta in ``~/VibraVid``. La variabile d'ambiente ha la precedenza
+    su entrambi.
+    """
     env = os.environ.get("VIBRAVID_DIR", "").strip()
-    return Path(env).expanduser() if env else DEFAULT_VIBRAVID_DIR
+    if env:
+        return Path(env).expanduser()
+    incluso = Path(__file__).resolve().parent.parent / "vibravid"
+    if (incluso / "manual.py").exists():
+        return incluso
+    return DEFAULT_VIBRAVID_DIR
 
 
 def _python(base: Path) -> Path:
-    """Interprete Python del venv isolato di VibraVid."""
-    return base / "env" / "bin" / "python"
+    """Interprete con cui eseguire VibraVid.
+
+    In sviluppo è il venv isolato di VibraVid. Nel pacchetto distribuibile non
+    c'è alcun venv: le dipendenze dei due progetti convivono nello stesso
+    Python incorporato, quindi si riusa quello che sta già eseguendo la GUI.
+    """
+    venv = base / "env" / "bin" / "python"
+    return venv if venv.exists() else Path(sys.executable)
 
 
 def vibravid_available() -> bool:
