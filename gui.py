@@ -68,6 +68,57 @@ except Exception:  # noqa: BLE001
     class YtdlpCancelled(Exception):
         pass
 
+# --- Funzione opzionale "VibraVid", anch'essa completamente isolata ---
+# Se VibraVid non è installato sul Mac, la scheda non compare.
+try:
+    from vibravid_downloads import (
+        apri_nel_lettore as vibravid_apri_lettore,
+        lettore_disponibile as vibravid_lettore,
+        risolvi_flusso as vibravid_risolvi,
+        sito_riproducibile as vibravid_riproducibile,
+        list_episodes as vibravid_episodes,
+        list_seasons as vibravid_seasons,
+        list_sites as vibravid_sites,
+        output_root as vibravid_output_root,
+        run_vibravid_search,
+        search_titles as vibravid_search_titles,
+        vibravid_available,
+    )
+    from vibravid_downloads import _Cancelled as VibravidCancelled
+except Exception:  # noqa: BLE001
+    def vibravid_available() -> bool:
+        return False
+
+    def vibravid_sites() -> list:
+        return []
+
+    def vibravid_output_root(custom_path=None):  # noqa: ARG001
+        return Path.home()
+
+    def vibravid_search_titles(site: str, query: str) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def vibravid_seasons(site: str, query: str, item: str) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def vibravid_episodes(site: str, query: str, item: str, season: str) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def vibravid_lettore() -> bool:
+        return False
+
+    def vibravid_riproducibile(site: str) -> bool:  # noqa: ARG001
+        return False
+
+    def vibravid_risolvi(params: dict) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def vibravid_apri_lettore(indirizzo: str) -> str | None:  # noqa: ARG001
+        return "Funzione non disponibile."
+
+    class VibravidCancelled(Exception):
+        pass
+
 PROJECT_DIR = Path(__file__).resolve().parent
 # I video finiscono di default in ~/Downloads (il tool aggiunge "Downloads/<anime>")
 DEFAULT_BASE = str(Path.home())
@@ -96,6 +147,12 @@ class AppState:
         self.download_path: str | None = None
         self.speed_bps = 0.0
         self.bytes_now = 0
+        # Totale reale in byte, quando il motore lo dichiara (VibraVid somma
+        # le sue tracce). Se resta 0 si ricade sulla stima per estrapolazione.
+        self.bytes_total = 0
+        # Download in attesa: si svuota da sola quando il precedente finisce.
+        self.queue: list[dict] = []
+        self.queue_seq = 0
         self.last_error: str | None = None
         self.error_seq = 0
         self.manual_progress = False  # True quando l'avanzamento lo gestisce yt-dlp
@@ -124,15 +181,25 @@ class AppState:
                 task["pct"] for task in self.tasks.values() if task["visible"]
             ) / 100
             eta = est = None
-            if (
+            if self.bytes_total > self.bytes_now:
+                # Totale dichiarato dal motore: preciso, niente estrapolazioni.
+                est = float(self.bytes_total)
+                if self.speed_bps > 100_000:
+                    eta = max((est - self.bytes_now) / self.speed_bps, 0)
+            elif (
                 self.running
                 and total > 0
                 and self.bytes_now > 1_000_000
                 and self.speed_bps > 100_000
                 and eff / total > 0.04
             ):
-                est = self.bytes_now / (eff / total)
-                eta = max((est - self.bytes_now) / self.speed_bps, 0)
+                # Stima per estrapolazione: usata solo se il totale non si sa.
+                # Può risultare più piccola di quanto già scaricato, perciò
+                # viene mostrata solo finché resta plausibile.
+                stima = self.bytes_now / (eff / total)
+                if stima >= self.bytes_now:
+                    est = stima
+                    eta = max((est - self.bytes_now) / self.speed_bps, 0)
             return {
                 "running": self.running,
                 "log": self.log_lines[:],
@@ -145,7 +212,15 @@ class AppState:
                 "eta_s": eta,
                 "last_error": self.last_error,
                 "error_seq": self.error_seq,
+                # La voce porta con sé la funzione da eseguire, che non è
+                # serializzabile: all'interfaccia servono solo le etichette.
+                "queue": [
+                    {"id": v["id"], "label": v["label"], "detail": v["detail"]}
+                    for v in self.queue
+                ],
                 "ytdlp": ytdlp_available(),
+                "vibravid": vibravid_available(),
+                "stage": self.overall.get("stage"),
             }
 
 
@@ -203,7 +278,7 @@ def notify(anime_name: str) -> None:
     """Mostra una notifica di sistema a download completato."""
     script = (
         'display notification "Download completato" '
-        f"with title \"AnimeUnity Downloader\" subtitle {json.dumps(anime_name)}"
+        f"with title \"Vault\" subtitle {json.dumps(anime_name)}"
     )
     subprocess.run(["osascript", "-e", script], check=False)
 
@@ -580,15 +655,213 @@ def download_other_site(
             state.manual_progress = False
 
 
-def start_job(job) -> str | None:
-    """Avvia un job in un thread. Ritorna un messaggio di errore o None."""
+# ===================================================== "VibraVid" (multi-sito)
+def formato_selezione(params: dict) -> str:
+    """Descrizione compatta di cosa è stato scaricato.
+
+    Compatta apposta, perché finisce in una riga d'elenco:
+    ``S01E01`` · ``S01E01-E03`` · ``S01 completa`` · ``S01-S03 complete``.
+    La lingua non compare: nell'elenco non aiuta a distinguere le voci.
+    """
+    stagione = str(params.get("season", "")).strip()
+    episodio = str(params.get("episode", "")).strip()
+
+    if stagione == "*":
+        return "tutte le stagioni"
+    if not stagione:
+        return ""
+
+    try:
+        esse = f"S{int(stagione):02d}"
+    except ValueError:
+        esse = f"S{stagione}"           # intervalli tipo "1-3"
+
+    if episodio in ("", "*"):
+        return f"{esse} completa"
+
+    numeri = []
+    for pezzo in episodio.split(","):
+        pezzo = pezzo.strip()
+        if pezzo.isdigit():
+            numeri.append(int(pezzo))
+    if not numeri:
+        return esse
+
+    numeri.sort()
+    if len(numeri) == 1:
+        return f"{esse} · E{numeri[0]:02d}"
+    # Consecutivi: si accorciano in un intervallo.
+    if numeri == list(range(numeri[0], numeri[-1] + 1)):
+        return f"{esse} · E{numeri[0]:02d}-E{numeri[-1]:02d}"
+    return esse + " · " + ", ".join(f"E{n:02d}" for n in numeri)
+
+
+def download_vibravid(
+    params: dict,
+    state: AppState,
+    cancel: threading.Event,
+) -> None:
+    """Scarica da un sito supportato da VibraVid lanciandolo come sottoprocesso.
+
+    Riusa lo stesso stato/interfaccia degli altri download: la barra resta
+    indeterminata (VibraVid gestisce il proprio avanzamento) e l'output completo
+    scorre nel log. Il testo di stato viene mostrato sotto la barra.
+    """
+    title = params.get("title") or params.get("query") or "VibraVid"
+    # Istante d'avvio: serve a distinguere i file di questo download da quelli
+    # già presenti nella cartella di destinazione.
+    inizio = time.time()
+    with state.lock:
+        state.manual_progress = True
+        state.download_path = None
+        # "unit" dice all'interfaccia che cosa sta contando: qui sono le tracce
+        # (video, audio, sottotitoli), non gli episodi. Chiamarle "episodi"
+        # faceva scrivere "0 di 2 episodi" anche scaricandone uno solo.
+        state.overall = {
+            "label": title, "total": 0, "done": 0,
+            "stage": "Avvio…", "unit": "tracce",
+        }
+        state.tasks = {}
+        state.speed_bps = 0.0
+        state.bytes_now = 0
+    state.log(f"VibraVid · sito: {params.get('site')} · ricerca: {params.get('query')}")
+
+    # Quanti episodi sono stati chiesti: serve per sapere a quanto ammonta il
+    # lavoro totale. Con "*" non si sa in anticipo e il totale cresce mano a
+    # mano che VibraVid annuncia gli episodi.
+    richiesti = str(params.get("episode", "")).strip()
+    if richiesti and richiesti != "*":
+        attesi = len([n for n in richiesti.split(",") if n.strip()])
+    else:
+        attesi = 0
+
+    # Stato dell'episodio in corso. Le tracce (video, audio, sottotitoli)
+    # ripetono le stesse etichette a ogni episodio: vanno azzerate a ogni
+    # passaggio, altrimenti il secondo episodio sovrascrive le righe del primo
+    # e il conteggio non avanza mai.
+    corrente = {"indice": 0, "nome": ""}
+    seen: dict[str, dict] = {}
+
+    def nuovo_episodio(nome: str) -> None:
+        """VibraVid ha annunciato un nuovo episodio: si riparte da zero."""
+        with state.lock:
+            corrente["indice"] += 1
+            corrente["nome"] = nome
+            seen.clear()
+            state.tasks = {}
+            state.overall["done"] = corrente["indice"] - 1
+            state.overall["total"] = max(attesi, corrente["indice"])
+            state.overall["unit"] = "episodi"
+            state.overall["stage"] = nome
+            state.bytes_now = 0
+            state.bytes_total = 0
+            state.speed_bps = 0.0
+
+    def on_progress(info: dict) -> None:
+        label = info["label"] or "Traccia"
+        with state.lock:
+            seen[label] = info
+            # Avanzamento dell'episodio in corso: media delle sue tracce.
+            pct_ep = sum(i["pct"] for i in seen.values()) / max(len(seen), 1)
+            state.tasks = {
+                0: {
+                    "desc": corrente["nome"] or "In corso",
+                    "pct": min(pct_ep, 100.0),
+                    "visible": True,
+                }
+            }
+            if state.overall["total"] == 0:
+                state.overall["total"] = max(attesi, 1)
+                state.overall["unit"] = "episodi"
+            state.overall["stage"] = ""
+            # Byte reali delle tracce dell'episodio, non una stima.
+            state.bytes_now = int(sum(i["done"] for i in seen.values()))
+            state.bytes_total = int(sum(i.get("total") or 0 for i in seen.values()))
+            state.speed_bps = sum(i["speed_bps"] for i in seen.values())
+
+    def on_stage(text: str) -> None:
+        with state.lock:
+            state.overall["stage"] = text
+
+    # Riga con cui VibraVid annuncia l'episodio: "… \ Episodio 2 (S1E2)"
+    episodio_re = re.compile(r"\\\s*(.+?)\s*\((S\d+E\d+)\)\s*$")
+
+    def formatta_episodio(codice: str) -> str:
+        """Da "S1E2" a "S01 E02": più leggibile e coerente con gli elenchi."""
+        parti = re.match(r"S(\d+)E(\d+)", codice, re.IGNORECASE)
+        if not parti:
+            return codice
+        return f"S{int(parti.group(1)):02d} · E{int(parti.group(2)):02d}"
+
+    def on_line(line: str) -> None:
+        match = episodio_re.search(line)
+        if match:
+            nuovo_episodio(formatta_episodio(match.group(2)))
+        state.log(line)
+
+    try:
+        run_vibravid_search(params, cancel, on_line, on_progress, on_stage)
+    except VibravidCancelled as exc:
+        raise DownloadCancelled from exc
+    finally:
+        with state.lock:
+            state.manual_progress = False
+
+    dest = str(vibravid_output_root(params.get("path") or None))
+    # Solo i file scritti da QUESTO download: sommare tutta la cartella
+    # includeva anche i download precedenti, gonfiando il totale (2,88 GB
+    # dichiarati per un file da 1,04 GB).
+    try:
+        size = sum(
+            f.stat().st_size
+            for f in Path(dest).rglob("*")
+            if f.is_file() and f.stat().st_mtime >= inizio - 5
+        )
+    except OSError:
+        size = 0
+    # Etichetta precisa: "titolo · stagione 1 · episodi 1, 2 · audio ITA".
+    # Il solo titolo non basta a capire cosa sia stato scaricato quando in
+    # elenco ci sono più voci della stessa serie.
+    etichetta = f"{title} · {formato_selezione(params)}".rstrip(" ·")
+
+    with state.lock:
+        state.completed.append({"label": etichetta, "path": dest, "size": size})
+    state.log(f"✅ Download di \"{etichetta}\" completato.")
+    if not os.environ.get("GUI_NO_BROWSER"):
+        notify(title)
+
+
+def start_job(job, label: str = "", detail: str = "") -> str | None:
+    """Mette un download in coda e, se non c'è nulla in corso, lo avvia.
+
+    Prima un secondo download veniva semplicemente rifiutato; ora si accoda e
+    parte da solo quando tocca a lui. Ritorna un messaggio d'errore o None.
+    """
     with STATE.lock:
-        if STATE.running:
-            return "C'è già un download attivo. Annullalo o attendi che finisca."
+        STATE.queue_seq += 1
+        STATE.queue.append({
+            "id": STATE.queue_seq,
+            "label": label or "Download",
+            "detail": detail,
+            "job": job,
+        })
+        occupato = STATE.running
+    if not occupato:
+        _avvia_prossimo()
+    return None
+
+
+def _avvia_prossimo() -> None:
+    """Toglie il primo elemento dalla coda e lo esegue in un thread."""
+    with STATE.lock:
+        if STATE.running or not STATE.queue:
+            return
+        voce = STATE.queue.pop(0)
         STATE.running = True
     STATE.cancel = threading.Event()
     STATE.reset_progress()
     cancel = STATE.cancel
+    job = voce["job"]
 
     def runner() -> None:
         try:
@@ -600,7 +873,7 @@ def start_job(job) -> str | None:
             with STATE.lock:
                 STATE.last_error = (
                     f"Si è verificato un errore: {err}"[:300]
-                    + "\n\nApri \"Mostra dettagli\" per maggiori informazioni."
+                    + "\n\nRiprova, oppure scegli un altro sito."
                 )
                 STATE.error_seq += 1
         finally:
@@ -608,10 +881,11 @@ def start_job(job) -> str | None:
                 STATE.running = False
                 STATE.download_path = None
                 STATE.manual_progress = False
+            # Tocca al prossimo della coda, se c'è.
+            _avvia_prossimo()
 
     STATE.worker = threading.Thread(target=runner, daemon=True)
     STATE.worker.start()
-    return None
 
 
 # ================================================================ server HTTP
@@ -658,6 +932,8 @@ class Handler(BaseHTTPRequestHandler):
             urls_path = PROJECT_DIR / URLS_FILE
             content = urls_path.read_text(encoding="utf-8") if urls_path.exists() else ""
             self._json({"content": content})
+        elif path == "/vibravid_sites":
+            self._json({"sites": vibravid_sites()})
         else:
             self._json({"error": "not found"}, code=404)
 
@@ -679,10 +955,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_ytdlp(data))
             elif path == "/ytdlp_formats":
                 self._json(self._handle_ytdlp_formats(data))
+            elif path == "/vibravid":
+                self._json(self._handle_vibravid(data))
+            elif path == "/vibravid_search":
+                self._json(self._handle_vibravid_search(data))
+            elif path == "/vibravid_seasons":
+                self._json(self._handle_vibravid_seasons(data))
+            elif path == "/vibravid_episodes":
+                self._json(self._handle_vibravid_episodes(data))
+            elif path == "/vibravid_watch":
+                self._json(self._handle_vibravid_watch(data))
             elif path == "/cancel":
                 if STATE.running:
                     STATE.cancel.set()
                     STATE.log("⏹ Annullamento in corso… attendo la fine degli episodi attivi.")
+                self._json({"ok": True})
+            elif path == "/queue_remove":
+                # Toglie un elemento in attesa senza toccare quello in corso.
+                voce_id = data.get("id")
+                with STATE.lock:
+                    prima = len(STATE.queue)
+                    STATE.queue = [v for v in STATE.queue if v["id"] != voce_id]
+                    rimossi = prima - len(STATE.queue)
+                if rimossi:
+                    STATE.log("🗑 Elemento rimosso dalla coda.")
                 self._json({"ok": True})
             elif path == "/clear_completed":
                 with STATE.lock:
@@ -754,10 +1050,14 @@ class Handler(BaseHTTPRequestHandler):
                 return {"error": "Indica gli episodi, es. 3, 7, 12."}
 
         custom_path = str(data.get("path", "")).strip() or DEFAULT_BASE
-        error = start_job(lambda cancel: download_one_anime(
-            url, STATE, cancel,
-            start=start, end=end, episodes=episodes, custom_path=custom_path,
-        ))
+        error = start_job(
+            lambda cancel: download_one_anime(
+                url, STATE, cancel,
+                start=start, end=end, episodes=episodes, custom_path=custom_path,
+            ),
+            label=url.rstrip("/").split("/")[-1].replace("-", " ").title(),
+            detail="AnimeUnity",
+        )
         return {"error": error} if error else {"ok": True}
 
     def _handle_batch(self, data: dict) -> dict:
@@ -783,7 +1083,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as err:  # noqa: BLE001
                     STATE.log(f"⚠️ Errore su {url}: {err}")
 
-        error = start_job(job)
+        error = start_job(job, label=f"{len(urls)} anime", detail="Batch")
         return {"error": error} if error else {"ok": True}
 
     def _handle_ytdlp(self, data: dict) -> dict:
@@ -801,10 +1101,115 @@ class Handler(BaseHTTPRequestHandler):
             data.get("quality") if data.get("quality") in QUALITY_LABELS else "best"
         )
         custom_path = str(data.get("path", "")).strip() or DEFAULT_BASE
-        error = start_job(lambda cancel: download_other_site(
-            raw_urls, options, STATE, cancel, custom_path=custom_path,
-        ))
+        error = start_job(
+            lambda cancel: download_other_site(
+                raw_urls, options, STATE, cancel, custom_path=custom_path,
+            ),
+            label=first.split("/")[2] if "/" in first else "Link",
+            detail=QUALITY_LABELS.get(options.get("quality", "best"), ""),
+        )
         return {"error": error} if error else {"ok": True}
+
+    def _handle_vibravid(self, data: dict) -> dict:
+        if not vibravid_available():
+            return {"error": "La funzione \"VibraVid\" non è disponibile."}
+        site = str(data.get("site", "")).strip()
+        query = str(data.get("query", "")).strip()
+        if not site:
+            return {"error": "Scegli un sito."}
+        if not query:
+            return {"error": "Inserisci un titolo da cercare."}
+
+        params = {
+            "site": site,
+            "query": query,
+            "title": str(data.get("title", "")).strip() or query,
+            "item": str(data.get("item", "")).strip(),
+            "season": str(data.get("season", "")).strip(),
+            "episode": str(data.get("episode", "")).strip(),
+            "year": str(data.get("year", "")).strip(),
+            "video": str(data.get("video", "")).strip(),
+            "audio": str(data.get("audio", "")).strip(),
+            "subtitle": str(data.get("subtitle", "")).strip(),
+            "path": str(data.get("path", "")).strip(),
+        }
+        error = start_job(
+            lambda cancel: download_vibravid(params, STATE, cancel),
+            label=params.get("title") or params.get("query") or "VibraVid",
+            detail=formato_selezione(params),
+        )
+        return {"error": error} if error else {"ok": True}
+
+    def _handle_vibravid_search(self, data: dict) -> dict:
+        if not vibravid_available():
+            return {"error": "La funzione \"VibraVid\" non è disponibile."}
+        site = str(data.get("site", "")).strip()
+        query = str(data.get("query", "")).strip()
+        if not site or not query:
+            return {"error": "Scegli un sito e scrivi un titolo da cercare."}
+        return vibravid_search_titles(site, query)
+
+    def _handle_vibravid_seasons(self, data: dict) -> dict:
+        """Quante stagioni ha il titolo scelto (vuoto = è un film)."""
+        if not vibravid_available():
+            return {"error": "La funzione \"VibraVid\" non è disponibile."}
+        site = str(data.get("site", "")).strip()
+        query = str(data.get("query", "")).strip()
+        item = str(data.get("item", "")).strip()
+        if not site or not query:
+            return {"error": "Scegli prima un titolo."}
+        return vibravid_seasons(site, query, item)
+
+    def _handle_vibravid_episodes(self, data: dict) -> dict:
+        """Episodi di una stagione, con durata quando disponibile."""
+        if not vibravid_available():
+            return {"error": "La funzione \"VibraVid\" non è disponibile."}
+        site = str(data.get("site", "")).strip()
+        query = str(data.get("query", "")).strip()
+        item = str(data.get("item", "")).strip()
+        season = str(data.get("season", "")).strip()
+        if not site or not query or not season:
+            return {"error": "Scegli prima una stagione."}
+        return vibravid_episodes(site, query, item, season)
+
+    def _handle_vibravid_watch(self, data: dict) -> dict:
+        """Risolve il flusso e lo apre nel lettore, senza scaricare nulla."""
+        if not vibravid_available():
+            return {"error": "La funzione \"VibraVid\" non è disponibile."}
+        if not vibravid_lettore():
+            return {"error": "IINA non è installato: la riproduzione diretta "
+                             "richiede un lettore."}
+        site = str(data.get("site", "")).strip()
+        if not vibravid_riproducibile(site):
+            return {"error": f"Il sito {site} consegna un flusso protetto: "
+                             "si può solo scaricare."}
+
+        params = {
+            "site": site,
+            "query": str(data.get("query", "")).strip(),
+            # Serve a cercare il file giusto quando è già scaricato: senza il
+            # titolo il solo codice episodio trovava la prima serie qualsiasi.
+            "title": str(data.get("title", "")).strip(),
+            "item": str(data.get("item", "")).strip(),
+            "season": str(data.get("season", "")).strip(),
+            "episode": str(data.get("episode", "")).strip(),
+            "audio": str(data.get("audio", "")).strip(),
+            "subtitle": str(data.get("subtitle", "")).strip(),
+            "path": str(data.get("path", "")).strip(),
+        }
+        esito = vibravid_risolvi(params)
+        if "error" in esito:
+            return esito
+
+        indirizzo = esito.get("file") or esito.get("url", "")
+        errore = vibravid_apri_lettore(indirizzo)
+        if errore:
+            return {"error": errore}
+        STATE.log(
+            "▶️ Riproduzione in IINA: "
+            + ("file già scaricato" if esito.get("file") else "flusso remoto")
+        )
+        return {"ok": True, "locale": bool(esito.get("file"))}
 
     def _handle_ytdlp_formats(self, data: dict) -> dict:
         if not ytdlp_available():

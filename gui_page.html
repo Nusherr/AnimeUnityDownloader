@@ -194,6 +194,21 @@
     border-color: var(--tile-red-fg); }
   .grp-lbl { font-size: 11px; color: var(--text3); letter-spacing: .04em; margin: 4px 0; }
 
+  /* --- Elenco risultati di ricerca (scheda VibraVid) --- */
+  #vResults { margin-top: 10px; border: 0.5px solid var(--sep); border-radius: 9px;
+    background: var(--field); max-height: 210px; overflow-y: auto; }
+  .res { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+    border-bottom: 0.5px solid var(--sep2); cursor: default; transition: background .12s; }
+  .res:last-child { border-bottom: none; }
+  .res:hover { background: var(--seg); }
+  .res.on { background: var(--tile-red); }
+  .res .rname { flex: 1; font-size: 13px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .res.on .rname { color: var(--tile-red-fg); font-weight: 600; }
+  .res .rmeta { font-size: 11.5px; color: var(--text3); flex: none;
+    font-variant-numeric: tabular-nums; }
+  .res.on .rmeta { color: var(--tile-red-fg); }
+
   .hidden { display: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
@@ -209,6 +224,7 @@
     <button data-v="single" class="active">Singolo</button>
     <button data-v="batch">Batch</button>
     <button data-v="other" id="tabOther" class="hidden">Altri siti</button>
+    <button data-v="vibra" id="tabVibra" class="hidden">VibraVid</button>
   </div>
 </div>
 <main>
@@ -273,6 +289,41 @@
       <button id="optToggle" class="link" onclick="toggleOpts()">Opzioni</button>
     </div>
     <div id="optPanel" class="hidden"></div>
+  </div>
+
+  <div id="paneVibra" class="hidden">
+    <div class="row" style="margin-top:0">
+      <span class="hint">Sito</span>
+      <select id="vSite" class="msel" style="height:40px; flex:1; min-width:140px; border-radius:9px"></select>
+    </div>
+    <div class="field" style="margin-top:12px">
+      <input id="vQuery" placeholder="Titolo da cercare (es. One Piece)…" spellcheck="false">
+      <button class="link" id="vSearchBtn" onclick="vibraSearch()" style="flex:none">Cerca</button>
+    </div>
+    <div id="vResults" class="hidden"></div>
+    <div class="row">
+      <span class="hint">Stagione</span>
+      <input class="mini" id="vSeason" placeholder="1" style="width:56px">
+      <span class="hint">Episodi</span>
+      <input class="mini" id="vEpisode" placeholder="1-5 · *" style="width:96px; text-align:left; padding:0 10px">
+      <span style="flex:1"></span>
+      <button class="btn" id="btnVibra" onclick="startVibra()">Scarica</button>
+    </div>
+    <div class="row">
+      <button id="vOptToggle" class="link" onclick="toggleVibraOpts()">Opzioni traccia</button>
+    </div>
+    <div id="vOpts" class="hidden">
+      <div class="opt-row"><span class="lbl">Audio</span>
+        <input class="minput" id="vAudio" placeholder="ita|it" style="width:120px"></div>
+      <div class="opt-row"><span class="lbl">Sottotitoli</span>
+        <input class="minput" id="vSub" placeholder="ita|eng" style="width:120px"></div>
+      <div class="opt-row"><span class="lbl">Video</span>
+        <input class="minput" id="vVideo" placeholder="best · 1080p" style="width:120px"></div>
+      <div class="opt-row"><span class="lbl">Anno</span>
+        <input class="minput" id="vYear" placeholder="2020 · 1990-2015" style="width:120px"></div>
+    </div>
+    <p class="hint2" style="margin-top:12px">Stagione/episodi valgono solo per le serie · lascia vuoto per i film.
+      I video vengono salvati nella cartella <b>Video</b> di VibraVid.</p>
   </div>
 
   <div class="dest">
@@ -357,7 +408,7 @@ function makeSeg(id, cb) {
   return ctl;
 }
 
-const PANES = { single: 'paneSingle', batch: 'paneBatch', other: 'paneOther' };
+const PANES = { single: 'paneSingle', batch: 'paneBatch', other: 'paneOther', vibra: 'paneVibra' };
 const tabCtl = makeSeg('tabSeg', (v) => {
   const to = $(PANES[v]);
   if (!to || !to.classList.contains('hidden')) return;
@@ -620,6 +671,83 @@ function startOther() {
   api('/ytdlp', { url: url, quality: otherQuality, options: collectOptions(), path: customPath });
 }
 
+let vItemIndex = '';   // indice del risultato scelto ('' = il primo)
+let vItemTitle = '';   // nome del risultato scelto (per l'etichetta)
+
+function startVibra() {
+  api('/vibravid', {
+    site: $('vSite').value, query: $('vQuery').value,
+    season: $('vSeason').value, episode: $('vEpisode').value,
+    year: $('vYear').value, item: vItemIndex, title: vItemTitle,
+    audio: $('vAudio').value, subtitle: $('vSub').value, video: $('vVideo').value,
+    path: customPath,
+  });
+}
+
+function clearVibraResults() {
+  vItemIndex = ''; vItemTitle = '';
+  $('vResults').innerHTML = '';
+  $('vResults').classList.add('hidden');
+}
+
+async function vibraSearch() {
+  const site = $('vSite').value, query = $('vQuery').value.trim();
+  if (!query) { alert('Scrivi un titolo da cercare.'); return; }
+  const box = $('vResults');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="res"><span class="rname" '
+    + 'style="color:var(--text2)">Ricerca in corso…</span></div>';
+  $('vSearchBtn').disabled = true;
+  try {
+    const data = await api('/vibravid_search', { site: site, query: query });
+    const list = (data && data.results) || [];
+    box.innerHTML = '';
+    if (!list.length) {
+      box.innerHTML = '<div class="res"><span class="rname" '
+        + 'style="color:var(--text2)">Nessun risultato.</span></div>';
+      return;
+    }
+    list.forEach((item, i) => {
+      const row = document.createElement('div');
+      row.className = 'res';
+      const kind = item.type === 'tv' ? 'serie' : (item.type === 'movie' ? 'film' : (item.type || ''));
+      row.innerHTML = '<span class="rname"></span><span class="rmeta"></span>';
+      row.querySelector('.rname').textContent = item.name || '(senza titolo)';
+      row.querySelector('.rmeta').textContent =
+        [kind, item.year].filter(Boolean).join(' · ');
+      row.onclick = () => {
+        [...box.children].forEach((c) => c.classList.remove('on'));
+        row.classList.add('on');
+        vItemIndex = String(i);
+        vItemTitle = item.name || '';
+      };
+      box.appendChild(row);
+    });
+    // Il primo risultato è quello che VibraVid userebbe da solo: preselezionato.
+    box.firstChild.click();
+  } finally {
+    $('vSearchBtn').disabled = false;
+  }
+}
+function toggleVibraOpts() {
+  $('vOpts').classList.toggle('hidden');
+}
+let vibraSitesLoaded = false;
+async function loadVibraSites() {
+  if (vibraSitesLoaded) return;
+  try {
+    const resp = await fetch('/vibravid_sites');
+    const data = await resp.json();
+    const sel = $('vSite');
+    sel.innerHTML = '';
+    (data.sites || []).forEach((s) => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s; sel.appendChild(o);
+    });
+    if ((data.sites || []).length) vibraSitesLoaded = true;
+  } catch (e) { /* riprova al prossimo giro */ }
+}
+
 async function showFormats() {
   const url = optState.batch ? $('otherBatch').value : $('otherUrl').value;
   if (!url.trim()) { alert('Inserisci prima un link.'); return; }
@@ -703,7 +831,9 @@ async function poll() {
     window.__running = s.running;
     $('btnBatch').disabled = s.running;
     $('btnOther').disabled = s.running;
+    $('btnVibra').disabled = s.running;
     if (s.ytdlp) $('tabOther').classList.remove('hidden');
+    if (s.vibravid) { $('tabVibra').classList.remove('hidden'); loadVibraSites(); }
     refreshSingleButton();
 
     if (lastErrorSeq === null) {
@@ -737,7 +867,7 @@ async function poll() {
         $('curCap').textContent = parts.length ? parts.join(' · ') : 'Avvio…';
       } else {
         $('curTrack').classList.add('indet');
-        $('curCap').textContent = 'Recupero informazioni…';
+        $('curCap').textContent = o.stage || 'Recupero informazioni…';
       }
       const sub = $('subRows');
       sub.innerHTML = '';
@@ -822,6 +952,13 @@ $('url').addEventListener('keydown', (e) => {
 $('otherUrl').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !$('btnOther').disabled) startOther();
 });
+// Invio nel campo titolo = cerca (poi si sceglie dall'elenco e si scarica).
+$('vQuery').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); vibraSearch(); }
+});
+// Se cambia il sito o il testo cercato, la selezione precedente non vale più.
+$('vQuery').addEventListener('input', clearVibraResults);
+$('vSite').addEventListener('change', clearVibraResults);
 $('url').addEventListener('input', refreshSingleButton);
 refreshSingleButton();
 if (native) {

@@ -171,3 +171,11 @@ URLs.txt
 
 # --- Funzione "Altri siti" (yt-dlp) — binari scaricati a parte ---
 tools/
+
+# Configurazione privata generata per VibraVid: è una copia della sua,
+# e login.json può contenere credenziali dei servizi.
+vibravid_conf/
+
+# Artefatti di compilazione dell'app nativa: si rigenerano con build_native.sh
+macos_app/native/GlassApp
+macos_app/native/*.app
