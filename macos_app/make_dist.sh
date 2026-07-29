@@ -8,7 +8,7 @@
 # Richiede una connessione a internet (scarica il Python portatile).
 set -e
 
-PROJECT="/Users/lorenzopecorale/Library/Application Support/AnimeUnityDownloader"
+PROJECT="/Users/lorenzopecorale/Library/Application Support/Vault"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 STAGE="$HERE/dist"
 APP="$STAGE/AnimeUnity Downloader.app"

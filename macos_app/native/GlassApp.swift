@@ -966,13 +966,26 @@ struct VibraPane: View {
         loadSeasons()
     }
 
+    /// Carica l'elenco dei siti, riprovando finché il server non risponde.
+    ///
+    /// All'avvio a freddo l'app lancia il server Python e mostra subito la
+    /// finestra: la prima richiesta arriva quando il server non è ancora in
+    /// ascolto. Senza ritentare, il menu "Sito" restava vuoto per tutta la
+    /// sessione, e la scheda risultava inutilizzabile.
     func loadSites() async {
-        guard let (data, _) = try? await URLSession.shared.data(
-                from: serverBase.appending(path: "/vibravid_sites")),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = obj["sites"] as? [String] else { return }
-        sites = list
-        if !list.contains(site) { site = list.first ?? "" }
+        for tentativo in 0..<20 {
+            if let (data, _) = try? await URLSession.shared.data(
+                    from: serverBase.appending(path: "/vibravid_sites")),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = obj["sites"] as? [String], !list.isEmpty {
+                sites = list
+                if !list.contains(site) { site = list.first ?? "" }
+                return
+            }
+            if tentativo < 19 {
+                try? await Task.sleep(for: .milliseconds(600))
+            }
+        }
     }
 
     func search() {
@@ -1432,7 +1445,7 @@ final class ServerLauncher: NSObject, NSApplicationDelegate {
         }
         candidates.append((Bundle.main.bundlePath as NSString).deletingLastPathComponent)
         candidates.append((NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Application Support/AnimeUnityDownloader"))
+            .appendingPathComponent("Library/Application Support/Vault"))
         for dir in candidates
         where fm.fileExists(atPath: (dir as NSString).appendingPathComponent("gui.py")) {
             return dir

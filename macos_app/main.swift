@@ -52,7 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKScriptMessag
         }
         candidates.append((Bundle.main.bundlePath as NSString).deletingLastPathComponent)
         candidates.append((NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Application Support/AnimeUnityDownloader"))
+            .appendingPathComponent("Library/Application Support/Vault"))
         for dir in candidates
         where fm.fileExists(atPath: (dir as NSString).appendingPathComponent("gui.py")) {
             return dir
