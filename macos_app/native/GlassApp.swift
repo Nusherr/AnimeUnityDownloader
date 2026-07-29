@@ -1,0 +1,1622 @@
+// Vault — interfaccia nativa SwiftUI con Liquid Glass.
+//
+// Sostituisce la pagina HTML mostrata nella WKWebView: parla con lo stesso
+// server Python (gui.py su 127.0.0.1:8765) tramite le sue API JSON, quindi
+// il motore di download resta identico e non va toccato.
+//
+// Compilazione (vedi build_native.sh):
+//   swiftc -O -parse-as-library -o GlassApp GlassApp.swift
+//
+// Richiede macOS 26 (Tahoe) per le API Liquid Glass.
+
+import SwiftUI
+
+let serverBase = URL(string: "http://127.0.0.1:8765")!
+let accent = Color(red: 0.83, green: 0.0, blue: 0.25)
+
+/// Accento che segue lo stato della finestra: quando perde il fuoco si smorza,
+/// come fanno da soli i controlli nativi di macOS. Tutto ciò che disegniamo a
+/// mano deve passare di qui, altrimenti resterebbe acceso mentre il resto
+/// dell'interfaccia è spento.
+func accento(_ stato: ControlActiveState) -> Color {
+    stato == .inactive ? Color.secondary.opacity(0.55) : accent
+}
+
+// ============================================================ dati dal server
+struct Overall: Decodable {
+    var label: String = ""
+    var total: Double = 0
+    var done: Double = 0
+    var stage: String?
+    /// Che cosa sta contando `total`: "episodi" per AnimeUnity, "tracce" per
+    /// VibraVid (video, audio, sottotitoli). Serve a non chiamare episodi
+    /// quello che episodi non è.
+    var unit: String?
+}
+
+struct EpisodeRow: Decodable, Identifiable {
+    var desc: String
+    var pct: Double
+    var id: String { desc }
+
+    /// True per le righe che descrivono un flusso interno anziché un episodio:
+    /// "Vid [H.264, AAC] 1920x1080", "Aud it-IT [DEFAULT]", "Sub [vtt] en-US".
+    var isTraccia: Bool {
+        let t = desc.trimmingCharacters(in: .whitespaces)
+        return t.hasPrefix("Vid ") || t.hasPrefix("Aud ") || t.hasPrefix("Sub ")
+    }
+}
+
+/// Elemento in attesa: parte quando il download in corso finisce.
+struct QueueItem: Decodable, Identifiable {
+    var id: Int
+    var label: String
+    var detail: String
+}
+
+struct CompletedRow: Decodable, Identifiable {
+    var label: String
+    var path: String
+    var size: Double
+    var id: String { path + label }
+}
+
+struct ServerState: Decodable {
+    var running: Bool = false
+    var log: [String] = []
+    var overall: Overall = Overall()
+    var episodes: [EpisodeRow] = []
+    var completed: [CompletedRow] = []
+    var speed_bps: Double = 0
+    var bytes_now: Double = 0
+    var bytes_total_est: Double?
+    var eta_s: Double?
+    var last_error: String?
+    var error_seq: Int = 0
+    var queue: [QueueItem] = []
+    var ytdlp: Bool = false
+    var vibravid: Bool = false
+}
+
+// ================================================================== modello
+@MainActor
+final class AppModel: ObservableObject {
+    /// Unico per tutta l'app: la finestra e l'icona nella barra dei menu
+    /// devono leggere lo stesso stato, altrimenti mostrerebbero cose diverse.
+    static let shared = AppModel()
+
+    @Published var state = ServerState()
+    @Published var reachable = false
+    @Published var destination = ""          // cartella scelta ("" = predefinita)
+    @Published var searchResults: [VibraResult] = []
+    @Published var searching = false
+
+    private var timer: Timer?
+
+    func start() {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { _ in
+            Task { await self.poll() }
+        }
+        Task { await poll() }
+    }
+
+    func poll() async {
+        guard let data = try? await get("/state"),
+              let decoded = try? JSONDecoder().decode(ServerState.self, from: data)
+        else { reachable = false; return }
+        reachable = true
+        state = decoded
+    }
+
+    // ------------------------------------------------------------ rete
+    private func get(_ path: String) async throws -> Data {
+        let (data, _) = try await URLSession.shared.data(from: serverBase.appending(path: path))
+        return data
+    }
+
+    @discardableResult
+    func post(_ path: String, _ body: [String: Any]) async -> [String: Any] {
+        var req = URLRequest(url: serverBase.appending(path: path))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        if let err = obj["error"] as? String { showAlert(err) }
+        return obj
+    }
+
+    func showAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    // -------------------------------------------------------- azioni
+    func cancel() { Task { await post("/cancel", [:]) } }
+    func rimuoviDallaCoda(_ id: Int) { Task { await post("/queue_remove", ["id": id]) } }
+    func clearCompleted() { Task { await post("/clear_completed", [:]) } }
+    func openDestination() { Task { await post("/open_folder", ["path": destination]) } }
+    func open(path: String) { Task { await post("/open_path", ["path": path]) } }
+
+    func pickFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Scegli"
+        panel.message = "Scegli la cartella di destinazione"
+        if panel.runModal() == .OK, let url = panel.url {
+            destination = url.path
+        }
+    }
+
+    var destinationName: String {
+        destination.isEmpty ? "Downloads"
+            : (URL(fileURLWithPath: destination).lastPathComponent)
+    }
+}
+
+struct VibraResult: Decodable, Identifiable {
+    var name: String
+    var type: String
+    var year: String
+    var index: Int = 0
+    var id: Int { index }
+
+    enum CodingKeys: String, CodingKey { case name, type, year }
+
+    var kind: String {
+        switch type {
+        case "tv": return "serie"
+        case "movie": return "film"
+        default: return type
+        }
+    }
+}
+
+// ================================================================ formattazione
+func fmtBytes(_ b: Double) -> String {
+    if b >= 1e9 { return String(format: "%.2f GB", b / 1e9).replacingOccurrences(of: ".", with: ",") }
+    if b >= 1e6 { return "\(Int(b / 1e6)) MB" }
+    return "\(Int(b / 1e3)) kB"
+}
+
+func fmtSpeed(_ bps: Double) -> String {
+    String(format: "%.1f MB/s", bps / 1e6).replacingOccurrences(of: ".", with: ",")
+}
+
+func fmtEta(_ s: Double) -> String {
+    s < 90 ? "meno di 2 minuti rimanenti" : "circa \(Int((s / 60).rounded())) minuti rimanenti"
+}
+
+// ==================================================================== schede
+/// L'ordine dei casi è quello con cui appaiono nella barra.
+/// "Singolo" e "Batch" erano due schede per lo stesso sito: ora sono un'unica
+/// scheda AnimeUnity con la modalità scelta al suo interno.
+enum Tab: String, CaseIterable, Identifiable {
+    case vibra = "VibraVid", animeunity = "AnimeUnity", other = "Altri siti"
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .vibra:      return "film.stack"
+        case .animeunity: return "square.and.arrow.down"
+        case .other:      return "globe"
+        }
+    }
+}
+
+
+// Pulsante con sola icona SF Symbol. Essendo senza testo porta con sé il
+// suggerimento a comparsa e l'etichetta per VoiceOver, altrimenti l'azione
+// resterebbe indovinabile solo dal disegno.
+struct IconButton: View {
+    let symbol: String
+    let hint: String                 // suggerimento + etichetta accessibile
+    var prominent: Bool = false      // azione principale: tinta d'accento
+    var size: CGFloat = 29
+    let action: () -> Void
+    @Environment(\.controlActiveState) private var stato
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.45, weight: .semibold))
+                .frame(width: size, height: size)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+        // Niente cerchio pieno sotto: prima il vetro era solo un velo su una
+        // pastiglia opaca e non si vedeva. Qui il colore lo porta la tinta del
+        // vetro stesso, così resta traslucido e lascia passare lo sfondo.
+        .glassEffect(prominent
+                        ? .regular.tint(accento(stato).opacity(0.8)).interactive()
+                        : .regular.interactive(),
+                     in: .circle)
+        .help(hint)
+        .accessibilityLabel(hint)
+    }
+}
+
+// Selettore a segmenti in vetro: stessa logica della barra schede, in piccolo.
+// Sostituisce il Picker di sistema, che userebbe il blu invece dell'accento.
+struct SegOption: Identifiable {
+    let id: String
+    let label: String
+}
+
+struct GlassSegmented: View {
+    @Environment(\.controlActiveState) private var stato
+    @Binding var selection: String
+    let options: [SegOption]
+    @State private var frames: [String: CGRect] = [:]
+
+    var body: some View {
+        let box = frames[selection] ?? .zero
+        GlassEffectContainer(spacing: 20) {
+            ZStack(alignment: .leading) {
+                if box != .zero {
+                    Capsule()
+                        .fill(accento(stato).opacity(0.22))
+                        .glassEffect(.regular.tint(accento(stato).opacity(0.34)).interactive(),
+                                     in: .capsule)
+                        .frame(width: box.width, height: box.height)
+                        .offset(x: box.minX)
+                }
+
+                HStack(spacing: 2) {
+                    ForEach(options) { opt in
+                        let on = (opt.id == selection)
+                        Button {
+                            withAnimation(.smooth(duration: 0.38, extraBounce: 0.3)) {
+                                selection = opt.id
+                            }
+                        } label: {
+                            Text(opt.label)
+                                .font(.system(size: 12, weight: on ? .semibold : .regular))
+                                .padding(.horizontal, 13)
+                                .padding(.vertical, 5)
+                                .contentShape(.capsule)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: TabFrames.self,
+                                value: [opt.id: geo.frame(in: .named("seg"))])
+                        })
+                    }
+                }
+            }
+            .coordinateSpace(name: "seg")
+            .onPreferenceChange(TabFrames.self) { frames = $0 }
+            .padding(3)
+            .glassEffect(.regular, in: .capsule)
+        }
+    }
+}
+
+// Barra schede fluttuante in Liquid Glass (stile Apple Music):
+// una capsula di vetro sopra la quale scorre il contenuto; la scheda attiva
+// ha la sua capsula che si sposta fluidamente grazie a glassEffectID.
+// Misura la posizione di ogni scheda, così l'indicatore può essere posizionato
+// esplicitamente: una sola vista che si sposta, mai ricreata.
+struct TabFrames: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect],
+                       nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+struct FloatingTabBar: View {
+    @Environment(\.controlActiveState) private var stato
+    @Binding var tab: Tab
+    let tabs: [Tab]
+    @State private var frames: [String: CGRect] = [:]
+
+    var body: some View {
+        // Spacing ampio: dentro un GlassEffectContainer le forme di vetro vicine
+        // si fondono, ed è questo che dà l'effetto "liquido" mentre l'indicatore
+        // scorre da una scheda all'altra.
+        let box = frames[tab.rawValue] ?? .zero
+        GlassEffectContainer(spacing: 26) {
+            ZStack(alignment: .leading) {
+                // Indicatore unico: dimensione e posizione imposte a mano, quindi
+                // si sposta invece di sparire e riapparire. Tinto d'accento così
+                // resta leggibile anche su fondi poco contrastati.
+                if box != .zero {
+                    Capsule()
+                        .fill(accento(stato).opacity(0.22))
+                        .glassEffect(.regular.tint(accento(stato).opacity(0.34)).interactive(),
+                                     in: .capsule)
+                        .frame(width: box.width, height: box.height)
+                        .offset(x: box.minX)
+                }
+
+                HStack(spacing: 2) {
+                    ForEach(tabs) { t in
+                        let on = (t == tab)
+                        Button {
+                            withAnimation(.smooth(duration: 0.45, extraBounce: 0.32)) {
+                                tab = t
+                            }
+                        } label: {
+                            Text(t.rawValue)
+                                .font(.system(size: 13, weight: on ? .semibold : .medium))
+                                .padding(.horizontal, 17)
+                                .padding(.vertical, 8)
+                                .contentShape(.capsule)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: TabFrames.self,
+                                value: [t.rawValue: geo.frame(in: .named("tabbar"))])
+                        })
+                    }
+                }
+            }
+            .coordinateSpace(name: "tabbar")
+            .onPreferenceChange(TabFrames.self) { frames = $0 }
+            .padding(4)
+            .glassEffect(.regular, in: .capsule)
+        }
+    }
+}
+
+// ================================================================== interfaccia
+struct ContentView: View {
+    @StateObject private var model = AppModel.shared
+    @State private var tab: Tab = .vibra
+    @State private var showLog = false
+
+    // Le schede opzionali compaiono solo se il motore corrispondente c'è.
+    var visibleTabs: [Tab] {
+        Tab.allCases.filter { t in
+            switch t {
+            case .other: return model.state.ytdlp
+            case .vibra: return model.state.vibravid
+            default: return true
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // --- Livello CONTENUTO: i moduli di inserimento ---
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Group {
+                        switch tab {
+                        case .vibra:      VibraPane(model: model)
+                        case .animeunity: AnimeUnityPane(model: model)
+                        case .other:      OtherPane(model: model)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+
+                    DestinationRow(model: model)
+                    Divider()
+                    DownloadsSection(model: model, showLog: $showLog)
+                }
+                .padding(22)
+                .frame(maxWidth: 620)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollContentBackground(.hidden)   // lascia passare la traslucenza
+        }
+        .frame(minWidth: 520, minHeight: 560)
+        // Sfondo traslucido della finestra, via API nativa di SwiftUI: è il
+        // sistema a gestirne la composizione, quindi non serve alcun intervento
+        // manuale su opacità, ridisegni o cambi di scrivania.
+        .containerBackground(.ultraThinMaterial, for: .window)
+        // Il download in corso non galleggia più sopra il contenuto: vive
+        // dentro la sezione DOWNLOAD, insieme a quelli completati.
+        //
+        // La barra delle schede invece galleggia in alto: il contenuto le scorre sotto, ed è questo
+        // che rende visibile la rifrazione del vetro.
+        .safeAreaInset(edge: .top) {
+            FloatingTabBar(tab: $tab, tabs: visibleTabs)
+                .padding(.top, 6)
+                .padding(.bottom, 8)
+        }
+        .animation(.snappy, value: model.state.running)
+        .onAppear { model.start() }
+    }
+}
+
+// ------------------------------------------------------------- AnimeUnity
+/// Un'unica scheda per AnimeUnity, con la modalità scelta al suo interno.
+/// In "Elenco" la scelta episodi non compare affatto: il motore scarica ogni
+/// anime per intero, e un controllo che non ha effetto è peggio che assente.
+struct AnimeUnityPane: View {
+    @ObservedObject var model: AppModel
+    @State private var modalita = "singolo"
+    @State private var url = ""
+    @State private var mode = "all"
+    @State private var start = ""
+    @State private var end = ""
+    @State private var list = ""
+    @State private var elenco = ""
+
+    var unSolo: Bool { modalita == "singolo" }
+    var linkValido: Bool { url.contains("/anime/") }
+
+    /// Almeno una riga non vuota nell'elenco.
+    var haLink: Bool {
+        elenco.split(separator: "\n").contains {
+            !$0.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    var pronto: Bool { unSolo ? linkValido : haLink }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Text("Modalità").font(.caption).foregroundStyle(.secondary)
+                GlassSegmented(selection: $modalita, options: [
+                    SegOption(id: "singolo", label: "Un anime"),
+                    SegOption(id: "elenco", label: "Elenco"),
+                ])
+            }
+
+            if unSolo {
+                TextField("Incolla il link dell'anime da AnimeUnity…", text: $url)
+                    .textFieldStyle(.roundedBorder).controlSize(.large)
+                    .onSubmit { if linkValido { avvia() } }
+            } else {
+                // Campo multiriga nativo: stesso TextField del caso singolo,
+                // con asse verticale. Prima era un TextEditor con sfondo,
+                // angoli e segnaposto disegnati a mano — TextEditor un
+                // segnaposto non ce l'ha, e si vedeva.
+                TextField("Un link per riga…", text: $elenco, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
+                    .lineLimit(4...10)
+                HStack {
+                    Button("Ricarica elenco") { caricaElenco() }.buttonStyle(.link)
+                    Button("Salva elenco") {
+                        Task { await model.post("/save_urls", ["content": elenco]) }
+                    }.buttonStyle(.link)
+                    Spacer()
+                }
+            }
+
+            HStack(spacing: 12) {
+                // La scelta episodi vale solo per un anime alla volta.
+                if unSolo {
+                    Text("Episodi").font(.caption).foregroundStyle(.secondary)
+                    GlassSegmented(selection: $mode, options: [
+                        SegOption(id: "all", label: "Tutti"),
+                        SegOption(id: "range", label: "Intervallo"),
+                        SegOption(id: "list", label: "Specifici"),
+                    ])
+                } else {
+                    Text("Ogni anime dell'elenco viene scaricato per intero")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+                Spacer()
+                IconButton(symbol: "arrow.down.to.line",
+                           hint: model.state.running ? "Aggiungi alla coda" : "Scarica",
+                           prominent: true) { avvia() }
+                    .disabled(!pronto)
+                    .opacity(pronto ? 1 : 0.4)
+            }
+
+            if unSolo && mode == "range" {
+                HStack(spacing: 10) {
+                    Text("da").foregroundStyle(.secondary)
+                    TextField("", text: $start).frame(width: 62)
+                    Text("a").foregroundStyle(.secondary)
+                    TextField("", text: $end).frame(width: 62)
+                    Text("vuoto = dall'inizio / fino alla fine")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+                .textFieldStyle(.roundedBorder)
+            } else if unSolo && mode == "list" {
+                HStack(spacing: 10) {
+                    TextField("3, 7, 12", text: $list).frame(width: 180)
+                        .textFieldStyle(.roundedBorder)
+                    Text("numeri separati da virgola")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .animation(.snappy, value: modalita)
+        .animation(.snappy, value: mode)
+        .task { caricaElenco() }
+    }
+
+    func avvia() {
+        Task {
+            if unSolo {
+                await model.post("/download", [
+                    "url": url, "mode": mode, "start": start, "end": end,
+                    "episodes": list, "path": model.destination,
+                ])
+            } else {
+                await model.post("/batch", [
+                    "urls": elenco, "path": model.destination,
+                ])
+            }
+        }
+    }
+
+    func caricaElenco() {
+        Task {
+            guard let (data, _) = try? await URLSession.shared.data(
+                    from: serverBase.appending(path: "/urls")),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let content = obj["content"] as? String else { return }
+            elenco = content
+        }
+    }
+}
+
+struct OtherPane: View {
+    @ObservedObject var model: AppModel
+    @State private var url = ""
+    @State private var quality = "best"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("Incolla un link (YouTube, Vimeo, …)", text: $url)
+                .textFieldStyle(.roundedBorder).controlSize(.large)
+
+            HStack(spacing: 12) {
+                Text("Qualità").foregroundStyle(.secondary).font(.callout)
+                GlassSegmented(selection: $quality, options: [
+                    SegOption(id: "best", label: "Migliore"),
+                    SegOption(id: "1080", label: "1080p"),
+                    SegOption(id: "720", label: "720p"),
+                    SegOption(id: "480", label: "480p"),
+                    SegOption(id: "audio", label: "Audio"),
+                ])
+
+                Spacer()
+                IconButton(symbol: "arrow.down.to.line",
+                           hint: model.state.running ? "Aggiungi alla coda" : "Scarica",
+                           prominent: true) {
+                    Task {
+                        await model.post("/ytdlp", [
+                            "url": url, "quality": quality,
+                            "options": [:], "path": model.destination,
+                        ])
+                    }
+                }
+                .disabled(url.isEmpty)
+                .opacity(url.isEmpty ? 0.4 : 1)
+            }
+
+            Text("Il pannello opzioni completo arriverà nella prossima versione.")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- VibraVid
+struct SeasonInfo: Identifiable {
+    let index: Int
+    let name: String
+    var id: Int { index }
+}
+
+struct EpisodeInfo: Identifiable {
+    let index: Int
+    let name: String
+    let duration: Int?
+    var id: Int { index }
+}
+
+/// Pastiglia selezionabile in vetro, usata per stagioni ed episodi.
+struct Chip: View {
+    @Environment(\.controlActiveState) private var stato
+    let label: String
+    let on: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 12, weight: on ? .semibold : .regular))
+                .padding(.horizontal, 13)
+                .padding(.vertical, 6)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(on ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+        .background {
+            Capsule().fill(on ? accento(stato).opacity(0.85) : Color.primary.opacity(0.08))
+        }
+    }
+}
+
+/// Scheda VibraVid a passi: prima si sceglie il titolo, poi — solo se è una
+/// serie — compaiono stagioni ed episodi, con il conteggio di quanti ce ne sono.
+struct VibraPane: View {
+    @Environment(\.controlActiveState) private var stato
+    @ObservedObject var model: AppModel
+    @State private var site = "streamingcommunity"
+    @State private var sites: [String] = []
+    @State private var query = ""
+
+    // Titolo scelto
+    @State private var chosen: Int? = nil
+    @State private var chosenTitle = ""
+    @State private var chosenKind = ""
+
+    // Stagioni
+    @State private var seasons: [SeasonInfo] = []
+    @State private var loadingSeasons = false
+    @State private var isMovie = false
+    @State private var seasonsError: String? = nil
+    @State private var allSeasons = false
+    @State private var selectedSeason: Int? = nil
+
+    // Episodi
+    @State private var episodes: [EpisodeInfo] = []
+    @State private var loadingEpisodes = false
+    @State private var allEpisodes = true
+    @State private var pickedEpisodes: Set<Int> = []
+
+    // Lingua e sottotitoli: solo italiano e inglese, il resto si ignora.
+    // Di partenza audio italiano e nessun sottotitolo.
+    @State private var audio = "ita"
+    @State private var sottotitoli = ""
+
+    // Riproduzione diretta nel lettore
+    @State private var apreLettore = false
+
+    /// Siti che consegnano il flusso cifrato: lì un lettore esterno non può
+    /// riprodurre nulla, quindi il pulsante non compare.
+    static let sitiProtetti: Set<String> = [
+        "crunchyroll", "raiplay", "mediasetinfinity", "discoveryplus",
+        "dmax", "nove", "realtime", "foodnetwork", "homegardentv",
+    ]
+
+    /// Il ▶︎ ha senso solo su un singolo episodio (o un film) da un sito in chiaro.
+    var puoGuardare: Bool {
+        guard chosen != nil, !Self.sitiProtetti.contains(site.lowercased()) else {
+            return false
+        }
+        if isMovie { return true }
+        guard isSeries, !allSeasons, selectedSeason != nil else { return false }
+        return !allEpisodes && pickedEpisodes.count == 1
+    }
+
+    var isSeries: Bool { !isMovie && !seasons.isEmpty }
+    var canDownload: Bool {
+        guard chosen != nil else { return false }
+        if !isSeries { return true }                       // film: basta il titolo
+        if allSeasons { return true }                      // tutte le stagioni
+        guard selectedSeason != nil else { return false }  // serve una stagione
+        return allEpisodes || !pickedEpisodes.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // ---- 1. Dove cercare
+            HStack(spacing: 12) {
+                Text("Sito").foregroundStyle(.secondary).font(.callout)
+                Picker("", selection: $site) {
+                    ForEach(sites, id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+                .onChange(of: site) { _, _ in resetAll() }
+            }
+
+            HStack(spacing: 10) {
+                TextField("Titolo da cercare (es. One Piece)…", text: $query)
+                    .textFieldStyle(.roundedBorder).controlSize(.large)
+                    .onSubmit { search() }
+                    .onChange(of: query) { _, _ in resetAll() }
+                IconButton(symbol: "magnifyingglass", hint: "Cerca") { search() }
+                    .disabled(model.searching || query.isEmpty)
+                    .opacity(model.searching || query.isEmpty ? 0.4 : 1)
+            }
+
+            // ---- 2. Risultati: si sceglie il titolo
+            if model.searching {
+                loadingRow("Ricerca in corso…")
+            } else if chosen != nil {
+                // Titolo scelto: l'elenco si richiude e resta solo la riga
+                // selezionata, così la schermata non resta ingombra.
+                HStack(spacing: 9) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(accento(stato))
+                    Text(chosenTitle).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(chosenKind == "movie" ? "· film" : "· serie")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cambia") { chosen = nil }.buttonStyle(.link)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(accento(stato).opacity(0.14), in: .rect(cornerRadius: 9))
+            } else if !model.searchResults.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    stepLabel("1", "Scegli il titolo",
+                              detail: "\(model.searchResults.count) risultati")
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(model.searchResults) { r in
+                                HStack {
+                                    Text(r.name).lineLimit(1)
+                                    Spacer()
+                                    Text([r.kind, r.year]
+                                        .filter { !$0.isEmpty }.joined(separator: " · "))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12).padding(.vertical, 9)
+                                .background(chosen == r.index ? accento(stato).opacity(0.18) : .clear)
+                                .contentShape(.rect)
+                                .onTapGesture { choose(r) }
+                                Divider()
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 170)
+                    .background(.background.secondary, in: .rect(cornerRadius: 9))
+                }
+            }
+
+            // ---- 3. Stagioni (solo dopo aver scelto, e solo se è una serie)
+            if chosen != nil {
+                if loadingSeasons {
+                    loadingRow("Leggo le stagioni di \"\(chosenTitle)\"…")
+                } else if let err = seasonsError {
+                    HStack(alignment: .top, spacing: 7) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(err).font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Riprova") { loadSeasons() }.buttonStyle(.link)
+                    }
+                } else if isMovie {
+                    HStack(spacing: 7) {
+                        Image(systemName: "film").foregroundStyle(accento(stato))
+                        Text("\(chosenTitle) è un film: nessuna stagione da scegliere.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                } else if !seasons.isEmpty {
+                    VStack(alignment: .leading, spacing: 7) {
+                        stepLabel("2", "Scegli la stagione",
+                                  detail: "\(seasons.count) stagioni disponibili")
+                        FlowChips {
+                            Chip(label: "Tutte le stagioni", on: allSeasons) {
+                                allSeasons = true
+                                selectedSeason = nil
+                                episodes = []
+                            }
+                            ForEach(seasons) { s in
+                                Chip(label: s.name, on: !allSeasons && selectedSeason == s.index) {
+                                    allSeasons = false
+                                    selectedSeason = s.index
+                                    loadEpisodes(s.index)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- 4. Episodi (solo dopo aver scelto una stagione precisa)
+            if isSeries && !allSeasons && selectedSeason != nil {
+                if loadingEpisodes {
+                    loadingRow("Leggo gli episodi…")
+                } else if !episodes.isEmpty {
+                    VStack(alignment: .leading, spacing: 7) {
+                        stepLabel("3", "Scegli gli episodi",
+                                  detail: "\(episodes.count) episodi")
+                        FlowChips {
+                            Chip(label: "Tutti gli episodi", on: allEpisodes) {
+                                allEpisodes = true
+                                pickedEpisodes = []
+                            }
+                            ForEach(episodes) { e in
+                                Chip(label: "\(e.index)",
+                                     on: !allEpisodes && pickedEpisodes.contains(e.index)) {
+                                    allEpisodes = false
+                                    if pickedEpisodes.contains(e.index) {
+                                        pickedEpisodes.remove(e.index)
+                                    } else {
+                                        pickedEpisodes.insert(e.index)
+                                    }
+                                }
+                            }
+                        }
+                        if let total = totalMinutes, allEpisodes {
+                            Text("Durata complessiva: circa \(total) minuti")
+                                .font(.caption).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+
+            // ---- 4. Lingua e sottotitoli, una volta scelto cosa scaricare
+            if chosen != nil && (isMovie || allSeasons || selectedSeason != nil) {
+                VStack(alignment: .leading, spacing: 7) {
+                    stepLabel("4", "Lingua e sottotitoli", detail: "italiano o inglese")
+                    HStack(spacing: 14) {
+                        HStack(spacing: 6) {
+                            Text("Audio").font(.caption).foregroundStyle(.secondary)
+                            Chip(label: "ITA", on: audio == "ita") { audio = "ita" }
+                            Chip(label: "ENG", on: audio == "eng") { audio = "eng" }
+                        }
+                        Divider().frame(height: 16)
+                        HStack(spacing: 6) {
+                            Text("Sottotitoli").font(.caption).foregroundStyle(.secondary)
+                            Chip(label: "Nessuno", on: sottotitoli.isEmpty) { sottotitoli = "" }
+                            Chip(label: "ITA", on: sottotitoli == "ita") { sottotitoli = "ita" }
+                            Chip(label: "ENG", on: sottotitoli == "eng") { sottotitoli = "eng" }
+                        }
+                        Spacer()
+                    }
+                }
+            }
+
+            // ---- 5. Avvio: compare solo quando c'è davvero qualcosa da scaricare
+            if chosen != nil {
+                HStack {
+                    Text(riepilogo).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if apreLettore {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small).scaleEffect(0.7)
+                            Text("Apro IINA…").font(.caption).foregroundStyle(.secondary)
+                        }
+                    } else if puoGuardare {
+                        IconButton(symbol: "play.fill", hint: "Guarda senza scaricare") {
+                            guarda()
+                        }
+                    }
+                    IconButton(symbol: "arrow.down.to.line",
+                               hint: model.state.running ? "Aggiungi alla coda" : "Scarica",
+                           prominent: true) { download() }
+                        .disabled(!canDownload)
+                        .opacity(canDownload ? 1 : 0.4)
+                }
+            }
+        }
+        .animation(.snappy, value: chosen)
+        .animation(.snappy, value: seasons.count)
+        .animation(.snappy, value: episodes.count)
+        .animation(.snappy, value: allSeasons)
+        .task { await loadSites() }
+    }
+
+    var totalMinutes: Int? {
+        let mins = episodes.compactMap(\.duration)
+        return mins.isEmpty ? nil : mins.reduce(0, +)
+    }
+
+    /// Coda del riepilogo con le lingue: la sola lingua audio, più i
+    /// sottotitoli quando ci sono. Dichiarare che NON ci sono occuperebbe
+    /// spazio senza aggiungere informazione.
+    var lingue: String {
+        var parti = [audio.uppercased()]
+        if !sottotitoli.isEmpty { parti.append("Sub \(sottotitoli.uppercased())") }
+        return " · " + parti.joined(separator: " · ")
+    }
+
+    /// Selezione compatta: "S01 · E01", "S01 · E01-E03", "S01 completa".
+    var selezione: String {
+        guard let s = selectedSeason else { return "" }
+        let esse = String(format: "S%02d", s)
+        if allEpisodes { return "\(esse) completa" }
+        let numeri = pickedEpisodes.sorted()
+        guard let primo = numeri.first, let ultimo = numeri.last else { return esse }
+        let ep = { (n: Int) in "E" + String(format: "%02d", n) }
+        if numeri.count == 1 { return "\(esse) · \(ep(primo))" }
+        if numeri == Array(primo...ultimo) {
+            return "\(esse) · \(ep(primo))-\(ep(ultimo))"
+        }
+        return esse + " · " + numeri.map(ep).joined(separator: ", ")
+    }
+
+    var riepilogo: String {
+        guard !chosenTitle.isEmpty else { return "" }
+        if !isSeries { return chosenTitle + lingue }
+        if allSeasons {
+            return "\(chosenTitle) · tutte le \(seasons.count) stagioni" + lingue
+        }
+        guard selectedSeason != nil else { return chosenTitle }
+        return "\(chosenTitle) · \(selezione)" + lingue
+    }
+
+    func stepLabel(_ n: String, _ title: String, detail: String) -> some View {
+        HStack(spacing: 7) {
+            Text(n)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 16, height: 16)
+                .background(Circle().fill(accento(stato)))
+            Text(title).font(.callout.weight(.medium))
+            Text("· \(detail)").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    func loadingRow(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(text).foregroundStyle(.secondary).font(.callout)
+        }
+    }
+
+    // ------------------------------------------------------------ azioni
+    func resetAll() {
+        model.searchResults = []
+        chosen = nil; chosenTitle = ""; chosenKind = ""
+        seasons = []; isMovie = false; allSeasons = false; selectedSeason = nil
+        seasonsError = nil
+        episodes = []; allEpisodes = true; pickedEpisodes = []
+    }
+
+    func choose(_ r: VibraResult) {
+        chosen = r.index
+        chosenTitle = r.name
+        chosenKind = r.type
+        seasons = []; isMovie = false; allSeasons = false; selectedSeason = nil
+        seasonsError = nil
+        episodes = []; allEpisodes = true; pickedEpisodes = []
+        loadSeasons()
+    }
+
+    func loadSites() async {
+        guard let (data, _) = try? await URLSession.shared.data(
+                from: serverBase.appending(path: "/vibravid_sites")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = obj["sites"] as? [String] else { return }
+        sites = list
+        if !list.contains(site) { site = list.first ?? "" }
+    }
+
+    func search() {
+        model.searching = true
+        model.searchResults = []
+        Task {
+            let obj = await model.post("/vibravid_search", ["site": site, "query": query])
+            var out: [VibraResult] = []
+            if let arr = obj["results"] as? [[String: Any]] {
+                for (i, d) in arr.enumerated() {
+                    out.append(VibraResult(
+                        name: d["name"] as? String ?? "",
+                        type: d["type"] as? String ?? "",
+                        year: d["year"] as? String ?? "",
+                        index: i))
+                }
+            }
+            model.searchResults = out
+            model.searching = false
+        }
+    }
+
+    func loadSeasons() {
+        guard let item = chosen else { return }
+        loadingSeasons = true
+        seasonsError = nil
+        Task {
+            let obj = await model.post("/vibravid_seasons", [
+                "site": site, "query": query, "item": String(item),
+            ])
+
+            // Un errore non deve mai travestirsi da "è un film": sono cose
+            // diverse e vanno dette in modo diverso.
+            if let err = obj["error"] as? String {
+                seasonsError = err
+                seasons = []
+                isMovie = false
+                loadingSeasons = false
+                return
+            }
+
+            var out: [SeasonInfo] = []
+            if let arr = obj["seasons"] as? [[String: Any]] {
+                for d in arr {
+                    out.append(SeasonInfo(
+                        index: d["index"] as? Int ?? 0,
+                        name: d["name"] as? String ?? ""))
+                }
+            }
+            seasons = out
+
+            if out.isEmpty {
+                // La ricerca ha già detto se è film o serie: quella è la fonte
+                // autorevole. Se dice "serie" ma non arrivano stagioni, è un
+                // guasto, non un film.
+                if chosenKind == "movie" {
+                    isMovie = true
+                } else {
+                    isMovie = false
+                    seasonsError = "Non sono riuscito a leggere le stagioni di "
+                        + "\"\(chosenTitle)\". Riprova, oppure scegli un altro sito."
+                }
+            } else {
+                isMovie = false
+            }
+            loadingSeasons = false
+        }
+    }
+
+    func loadEpisodes(_ season: Int) {
+        guard let item = chosen else { return }
+        loadingEpisodes = true
+        episodes = []
+        Task {
+            let obj = await model.post("/vibravid_episodes", [
+                "site": site, "query": query,
+                "item": String(item), "season": String(season),
+            ])
+            var out: [EpisodeInfo] = []
+            if let arr = obj["episodes"] as? [[String: Any]] {
+                for d in arr {
+                    out.append(EpisodeInfo(
+                        index: d["index"] as? Int ?? 0,
+                        name: d["name"] as? String ?? "",
+                        duration: d["duration"] as? Int))
+                }
+            }
+            episodes = out
+            loadingEpisodes = false
+        }
+    }
+
+    /// Risolve il flusso e lo apre in IINA, senza scaricare nulla.
+    func guarda() {
+        guard let item = chosen, let s = selectedSeason ?? (isMovie ? 0 : nil)
+        else { return }
+        apreLettore = true
+        Task {
+            await model.post("/vibravid_watch", [
+                "site": site, "query": query, "title": chosenTitle,
+                "item": String(item),
+                "season": isMovie ? "" : String(s),
+                "episode": pickedEpisodes.first.map(String.init) ?? "",
+                "audio": audio, "subtitle": sottotitoli,
+                "path": model.destination,
+            ])
+            apreLettore = false
+        }
+    }
+
+    func download() {
+        // "*" è la sintassi di VibraVid per "tutto".
+        var seasonArg = ""
+        var episodeArg = ""
+        if isSeries {
+            if allSeasons {
+                seasonArg = "*"
+                episodeArg = "*"
+            } else if let s = selectedSeason {
+                seasonArg = String(s)
+                episodeArg = allEpisodes
+                    ? "*"
+                    : pickedEpisodes.sorted().map(String.init).joined(separator: ",")
+            }
+        }
+        Task {
+            await model.post("/vibravid", [
+                "site": site, "query": query,
+                "item": chosen.map(String.init) ?? "",
+                "title": chosenTitle,
+                "season": seasonArg, "episode": episodeArg,
+                "audio": audio, "subtitle": sottotitoli,
+                "path": model.destination,
+            ])
+        }
+    }
+}
+
+/// Dispone le pastiglie su più righe quando non ci stanno in una sola.
+struct FlowChips<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) { content }
+                .padding(.vertical, 1)
+        }
+    }
+}
+
+// ------------------------------------------------------------ destinazione
+struct DestinationRow: View {
+    @Environment(\.controlActiveState) private var stato
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder.fill").foregroundStyle(accento(stato))
+            Text("Salva in")
+            Text(model.destinationName).fontWeight(.medium)
+            Button("Cambia…") { model.pickFolder() }.buttonStyle(.link)
+            Spacer()
+            Button("Apri cartella") { model.openDestination() }.buttonStyle(.link)
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+    }
+}
+
+// ------------------------------------- download in corso, dentro l'elenco
+/// Barra divisa in segmenti, uno per episodio: quelli finiti pieni, quello in
+/// corso riempito in parte, i rimanenti vuoti. Con un episodio solo degenera
+/// in una barra continua, così la riga ha sempre la stessa forma.
+struct BarraSegmenti: View {
+    let totali: Int
+    let fatti: Int
+    let corrente: Double        // 0…1 sull'episodio in corso
+    let colore: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let n = max(totali, 1)
+            let spazio: CGFloat = n > 1 ? 3 : 0
+            let largh = max((geo.size.width - spazio * CGFloat(n - 1)) / CGFloat(n), 1)
+            HStack(spacing: spazio) {
+                ForEach(0..<n, id: \.self) { i in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.primary.opacity(0.14))
+                        Capsule().fill(colore)
+                            .frame(width: i < fatti ? largh
+                                          : (i == fatti ? largh * corrente : 0))
+                    }
+                    .frame(width: largh)
+                }
+            }
+        }
+        .frame(height: 6)
+    }
+}
+
+/// Download in corso, dentro la sezione DOWNLOAD insieme ai completati.
+/// Una riga sola, sempre della stessa forma: titolo, pastiglia dell'episodio,
+/// barra e dettaglio. Con più episodi la barra si divide in segmenti.
+struct ActiveDownloadRow: View {
+    @ObservedObject var model: AppModel
+    /// Le barre native si smorzano quando la finestra perde il fuoco: la barra
+    /// a segmenti è disegnata a mano, quindi deve farlo da sé per non restare
+    /// accesa mentre tutto il resto è spento.
+    @Environment(\.controlActiveState) private var stato
+
+    var colore: Color {
+        stato == .inactive ? Color.secondary.opacity(0.55) : accent
+    }
+
+    var contaEpisodi: Bool { (model.state.overall.unit ?? "episodi") == "episodi" }
+    var totali: Int { max(Int(model.state.overall.total), 1) }
+    var fatti: Int { contaEpisodi ? Int(model.state.overall.done) : 0 }
+    var multi: Bool { contaEpisodi && totali > 1 }
+
+    /// Avanzamento dell'episodio in corso (0…1).
+    var pctCorrente: Double {
+        min((model.state.episodes.first?.pct ?? 0) / 100, 1)
+    }
+
+    /// Avanzamento complessivo, per la barra continua del caso singolo.
+    var pctTotale: Double {
+        guard totali > 0 else { return 0 }
+        return min((Double(fatti) + pctCorrente) / Double(totali), 1)
+    }
+
+    /// Codice dell'episodio in corso, es. "S01 E04".
+    var episodio: String {
+        let d = model.state.episodes.first?.desc ?? ""
+        // Accetta sia "S01E01" sia "S01 · E01": aggiungendo il pallino fra
+        // stagione ed episodio la vecchia forma non corrispondeva più e la
+        // pastiglia spariva senza segnalare nulla.
+        let forma = #"^S\d+\s*(·\s*)?E\d+"#
+        return d.range(of: forma, options: .regularExpression) != nil ? d : ""
+    }
+
+    var dettaglio: String {
+        let s = model.state
+        var parti: [String] = []
+        if s.bytes_now > 1e6 {
+            var t = fmtBytes(s.bytes_now)
+            if let est = s.bytes_total_est { t += " su \(fmtBytes(est))" }
+            parti.append(t)
+        }
+        if s.speed_bps > 1e5 { parti.append(fmtSpeed(s.speed_bps)) }
+        if let eta = s.eta_s { parti.append(fmtEta(eta)) }
+        if parti.isEmpty { return s.overall.stage ?? "Avvio…" }
+        return parti.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .glassEffect(.regular.tint(accento(stato).opacity(0.85)), in: .circle)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Text(model.state.overall.label)
+                        .font(.callout.weight(.medium)).lineLimit(1)
+                    if !episodio.isEmpty {
+                        Text(episodio)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(colore)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Capsule().fill(colore.opacity(0.16)))
+                    }
+                    Spacer(minLength: 8)
+                    if multi {
+                        Text("\(fatti + 1) di \(totali)")
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                }
+
+                if multi {
+                    BarraSegmenti(totali: totali, fatti: fatti,
+                                  corrente: pctCorrente, colore: colore)
+                } else if model.state.overall.total > 0 || pctCorrente > 0 {
+                    ProgressView(value: multi ? pctTotale : pctCorrente).tint(accento(stato))
+                } else {
+                    ProgressView().progressViewStyle(.linear).tint(accento(stato))
+                }
+
+                Text(dettaglio)
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+
+            Button { model.cancel() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .frame(width: 22, height: 22).contentShape(.circle)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .help("Annulla il download")
+        }
+        .padding(.bottom, 4)
+    }
+}
+
+/// Coda dei download in attesa: una riga sola che si apre al clic, così non
+/// occupa spazio quando non interessa.
+struct CodaRow: View {
+    @ObservedObject var model: AppModel
+    @Binding var aperta: Bool
+
+    var titoli: String {
+        model.state.queue.map(\.label).joined(separator: ", ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.snappy) { aperta.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .rotationEffect(.degrees(aperta ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                    Text(model.state.queue.count == 1
+                         ? "1 in coda" : "\(model.state.queue.count) in coda")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("· \(titoli)")
+                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                    Spacer()
+                }
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 40)
+
+            if aperta {
+                ForEach(Array(model.state.queue.enumerated()), id: \.element.id) { i, voce in
+                    HStack(spacing: 12) {
+                        Text("\(i + 1)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, height: 34)
+                            .background(Circle().fill(.primary.opacity(0.07)))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(voce.label).font(.callout).lineLimit(1)
+                            if !voce.detail.isEmpty {
+                                Text(voce.detail).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button {
+                            model.rimuoviDallaCoda(voce.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .frame(width: 20, height: 20).contentShape(.circle)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.tertiary)
+                        .help("Togli dalla coda")
+                    }
+                    .transition(.opacity)
+                }
+            }
+        }
+    }
+}
+
+// --------------------------------------------------------------- download
+struct DownloadsSection: View {
+    @ObservedObject var model: AppModel
+    @Binding var showLog: Bool
+    @State private var codaAperta = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("DOWNLOAD")
+                .font(.caption2).foregroundStyle(.tertiary).tracking(0.8)
+
+            // Il download in corso apre l'elenco, sopra quelli completati.
+            if model.state.running {
+                ActiveDownloadRow(model: model)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if !model.state.queue.isEmpty {
+                CodaRow(model: model, aperta: $codaAperta)
+                    .transition(.opacity)
+            }
+
+            if model.state.completed.isEmpty && !model.state.running {
+                VStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 38, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text("Nessun download")
+                        .font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                    Text("Incolla un link e premi Scarica")
+                        .font(.callout).foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity).padding(.vertical, 22)
+            }
+
+            ForEach(model.state.completed.reversed()) { c in
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.green)
+                        .frame(width: 36, height: 36)
+                        .background(.green.opacity(0.15), in: .rect(cornerRadius: 9))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(c.label).font(.callout).lineLimit(1)
+                        Text("Completato · \(fmtBytes(c.size))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Apri nel Finder") { model.open(path: c.path) }
+                        .buttonStyle(.link)
+                }
+            }
+
+            if !model.state.completed.isEmpty {
+                Button("Cancella elenco") { model.clearCompleted() }.buttonStyle(.link)
+            }
+
+            // Il pannello "Mostra dettagli" è stato rimosso: mostrava l'output
+            // grezzo del motore — migliaia di righe che l'interfaccia doveva
+            // ridisegnare, rendendola lentissima e senza dire nulla di utile.
+        }
+    }
+}
+
+// ======================================================= avvio del server
+// L'app da sola non scarica nulla: il motore è gui.py. Qui lo si avvia
+// all'apertura e lo si chiude all'uscita, con la stessa logica di main.swift
+// (l'app storica), così la nuova versione è lanciabile con un doppio clic.
+final class ServerLauncher: NSObject, NSApplicationDelegate {
+    var serverProcess: Process?
+
+    /// Cartella che contiene gui.py: dentro il bundle, accanto ad esso,
+    /// oppure nella posizione standard in Application Support.
+    func projectDir() -> String {
+        let fm = FileManager.default
+        var candidates: [String] = []
+        if let bundled = Bundle.main.resourcePath.map({
+            ($0 as NSString).appendingPathComponent("app")
+        }) {
+            candidates.append(bundled)
+        }
+        if let cfg = Bundle.main.path(forResource: "project_path", ofType: "txt"),
+           let stored = try? String(contentsOfFile: cfg, encoding: .utf8) {
+            candidates.append(stored.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        candidates.append((Bundle.main.bundlePath as NSString).deletingLastPathComponent)
+        candidates.append((NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/AnimeUnityDownloader"))
+        for dir in candidates
+        where fm.fileExists(atPath: (dir as NSString).appendingPathComponent("gui.py")) {
+            return dir
+        }
+        return candidates.last!
+    }
+
+    func pythonPath() -> String {
+        if let res = Bundle.main.resourcePath {
+            let bundled = (res as NSString).appendingPathComponent("python/bin/python3")
+            if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        }
+        return "/usr/bin/python3"
+    }
+
+    /// True se qualcuno risponde già sulla porta: in tal caso non si riavvia.
+    func serverAlreadyUp() -> Bool {
+        let sem = DispatchSemaphore(value: 0)
+        var up = false
+        var req = URLRequest(url: serverBase.appending(path: "/state"))
+        req.timeoutInterval = 1.2
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            up = (data != nil)
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 2)
+        return up
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !serverAlreadyUp() else { return }
+        let dir = projectDir()
+        guard FileManager.default.fileExists(
+                atPath: (dir as NSString).appendingPathComponent("gui.py")) else {
+            let alert = NSAlert()
+            alert.messageText = "Non trovo gui.py"
+            alert.informativeText =
+                "L'app cerca il motore di download in:\n\(dir)\n\n" +
+                "Sposta l'app accanto alla cartella del progetto, oppure " +
+                "avvia il server manualmente."
+            alert.alertStyle = .critical
+            alert.runModal()
+            return
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: pythonPath())
+        proc.arguments = ["gui.py"]
+        proc.currentDirectoryURL = URL(fileURLWithPath: dir)
+        var env = ProcessInfo.processInfo.environment
+        env["GUI_NO_BROWSER"] = "1"   // niente browser: la finestra è questa
+        proc.environment = env
+        do {
+            try proc.run()
+            serverProcess = proc
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Non riesco ad avviare il motore di download"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .critical
+            alert.runModal()
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        guard let proc = serverProcess, proc.isRunning else { return }
+        proc.terminate()
+        // Si attende davvero la fine: un server sopravvissuto verrebbe riusato
+        // al prossimo avvio con il codice Python già caricato in memoria,
+        // facendo credere che le modifiche non abbiano effetto.
+        let scadenza = Date().addingTimeInterval(3)
+        while proc.isRunning && Date() < scadenza {
+            usleep(80_000)
+        }
+        if proc.isRunning {
+            kill(proc.processIdentifier, SIGKILL)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Chiudere la finestra chiude l'app (e con essa il server): per una
+        // utility è il comportamento atteso, e non lascia processi appesi.
+        true
+    }
+
+    /// Clic sull'icona nel Dock ad app già avviata: se per qualsiasi motivo non
+    /// ci sono finestre, se ne mostra una invece di non fare nulla — altrimenti
+    /// l'app sembrerebbe sparita pur essendo in esecuzione.
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            for window in sender.windows where !window.isVisible {
+                window.makeKeyAndOrderFront(nil)
+            }
+            sender.activate(ignoringOtherApps: true)
+        }
+        return true
+    }
+}
+
+// ============================================== avanzamento nella barra dei menu
+/// Percentuale complessiva del download in corso, comune a tutte le schede.
+func percentuale(_ s: ServerState) -> Double? {
+    guard s.running else { return nil }
+    let o = s.overall
+    guard o.total > 0 else { return nil }
+    let extra = s.episodes.reduce(0) { $0 + $1.pct / 100 }
+    return min((o.done + extra) / o.total, 1)
+}
+
+/// Icona nella barra in alto: mostra la percentuale mentre si scarica e
+/// permette di controllare il download senza aprire la finestra.
+struct MenuBarContent: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if model.state.running {
+            Text(model.state.overall.label)
+            if let p = percentuale(model.state) {
+                Text("\(Int(p * 100))% completato")
+            } else if let stato = model.state.overall.stage, !stato.isEmpty {
+                Text(stato)
+            }
+            if model.state.speed_bps > 1e5 {
+                Text(fmtSpeed(model.state.speed_bps))
+            }
+            if !model.state.queue.isEmpty {
+                Text("\(model.state.queue.count) in coda")
+            }
+            Divider()
+            Button("Annulla download") { model.cancel() }
+        } else {
+            Text("Nessun download in corso")
+        }
+        Divider()
+        Button("Apri cartella") { model.openDestination() }
+        Button("Mostra finestra") {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first { !$0.isVisible }?.makeKeyAndOrderFront(nil)
+        }
+        Divider()
+        Button("Esci") { NSApp.terminate(nil) }
+    }
+}
+
+struct MenuBarLabel: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        if model.state.running, let p = percentuale(model.state) {
+            // Con la percentuale disponibile la si mostra come testo: nella
+            // barra dei menu è più leggibile di una barra minuscola.
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.down.circle.fill")
+                Text("\(Int(p * 100))%")
+            }
+        } else if model.state.running {
+            Image(systemName: "arrow.down.circle")
+        } else {
+            Image(systemName: "arrow.down.circle")
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+// ===================================================================== app
+@main
+struct GlassApp: App {
+    @NSApplicationDelegateAdaptor(ServerLauncher.self) var launcher
+
+    var body: some Scene {
+        // WindowGroup e non Window: con la scena a finestra singola, una volta
+        // chiusa non c'era più modo di riaprirla cliccando l'icona nel Dock —
+        // l'app restava in esecuzione senza finestre e sembrava rotta.
+        WindowGroup("Vault") {
+            ContentView()
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentMinSize)
+
+        MenuBarExtra {
+            MenuBarContent(model: AppModel.shared)
+        } label: {
+            MenuBarLabel(model: AppModel.shared)
+        }
+    }
+}
