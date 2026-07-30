@@ -204,7 +204,10 @@ def run_mangaworld_download(
         if end is not None:
             argv += ["--end", str(end)]
     if formato in ("pdf", "cbz"):
-        argv += ["--formato", formato]
+        # Scegliere un formato significa volere quello e basta: le immagini
+        # sono la materia prima, non un secondo risultato da tenersi. Con
+        # entrambi la stessa roba occupava il doppio.
+        argv += ["--formato", formato, "--solo-comic"]
 
     env = {k: v for k, v in os.environ.items()}
     env["PYTHONUNBUFFERED"] = "1"

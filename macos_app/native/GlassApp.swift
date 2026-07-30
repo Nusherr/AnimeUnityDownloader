@@ -766,7 +766,10 @@ struct MangaPane: View {
     @State private var start = ""
     @State private var end = ""
     @State private var elenco = ""           // capitoli sparsi: "3, 7, 12"
-    @State private var formato = ""          // "" | pdf | cbz
+    // PDF di partenza: è quello che si apre ovunque senza installare nulla.
+    // Le immagini sciolte restano possibili, ma sono la scelta di chi sa
+    // perché le vuole, quindi vanno in fondo.
+    @State private var formato = "pdf"       // pdf | cbz | "" (immagini)
 
     // Risultati della ricerca. Lo stesso campo serve a cercare e a incollare un
     // link: sono due modi di indicare lo stesso manga, e tenerli separati
@@ -1002,16 +1005,21 @@ struct MangaPane: View {
             }
 
             HStack(spacing: 12) {
-                Text("Genera anche").font(.caption).foregroundStyle(.secondary)
+                Text("Salva come").font(.caption).foregroundStyle(.secondary)
                 GlassSegmented(selection: $formato, options: [
-                    SegOption(id: "", label: "Solo immagini"),
                     SegOption(id: "pdf", label: "PDF"),
                     SegOption(id: "cbz", label: "CBZ"),
+                    SegOption(id: "", label: "Immagini"),
                 ])
                 Spacer()
             }
 
-            Text("Le pagine vengono salvate in una cartella per capitolo.")
+            // La scelta è esclusiva, e va detto: le immagini si scaricano
+            // comunque, ma scegliendo PDF o CBZ restano solo dentro il file.
+            Text(formato.isEmpty
+                    ? "Una cartella di immagini per capitolo."
+                    : "Un file \(formato.uppercased()) per capitolo. Le immagini "
+                      + "sciolte non vengono tenute.")
                 .font(.caption).foregroundStyle(.tertiary)
         }
         .animation(.snappy, value: mode)

@@ -83,7 +83,7 @@ def _rinomina_capitoli(cartella_manga: Path, numeri: list[int]) -> None:
         ponte.rename(nuova)
 
 
-def _genera_comic(cartella_manga: Path, formato: str) -> None:
+def _genera_comic(cartella_manga: Path, formato: str, *, sostituisci: bool) -> None:
     """Genera un PDF o CBZ per ciascun capitolo, e nient'altro.
 
     Non si usa il loro ``generate_comic_files`` perché produce un file di
@@ -106,6 +106,14 @@ def _genera_comic(cartella_manga: Path, formato: str) -> None:
 
     for capitolo in sorted(p for p in cartella_manga.iterdir() if p.is_dir()):
         generate_file_from_folder(str(capitolo), output_format=formato)
+        if not sostituisci:
+            continue
+        # Le immagini si tolgono solo se il file è nato davvero e non è vuoto:
+        # cancellarle "perché tanto il PDF c'è" significherebbe, il giorno che
+        # la generazione fallisce in silenzio, buttare via il download intero.
+        prodotto = capitolo.parent / f"{capitolo.name}.{formato}"
+        if prodotto.is_file() and prodotto.stat().st_size > 0:
+            shutil.rmtree(capitolo, ignore_errors=True)
 
 
 def _conta(url: str, extract_manga_info, fetch_page) -> int:  # noqa: ANN001
@@ -140,6 +148,8 @@ def main() -> int:
     ap.add_argument("--capitoli", default="",
                     help="capitoli sparsi, separati da virgola (es. 3,7,12)")
     ap.add_argument("--formato", default=None, choices=["pdf", "cbz"])
+    ap.add_argument("--solo-comic", dest="solo_comic", action="store_true",
+                    help="tiene solo il PDF o il CBZ, togliendo le immagini")
     ap.add_argument("--destinazione", default="")
     ap.add_argument("--conta", action="store_true",
                     help="stampa quanti capitoli ha il manga, senza scaricare")
@@ -214,7 +224,7 @@ def main() -> int:
         # PDF nascono già col nome del capitolo giusto.
         _rinomina_capitoli(cartella, [i + 1 for i in voluti[:len(link)]])
         if args.formato:
-            _genera_comic(cartella, args.formato)
+            _genera_comic(cartella, args.formato, sostituisci=args.solo_comic)
 
     asyncio.run(esegui())
     return 0
