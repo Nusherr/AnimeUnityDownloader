@@ -167,6 +167,23 @@ CRONOLOGIA = DATI_UTENTE / "cronologia.json"
 MAX_CRONOLOGIA = 200
 
 
+def _peso_ricorsivo(path: Path) -> int:
+    """Somma i file di una cartella comprese le sottocartelle.
+
+    ``folder_size()`` guarda solo il primo livello, e ad AnimeUnity basta: lì
+    gli episodi sono file dentro la cartella dell'anime. Un manga invece ha una
+    cartella per capitolo, quindi al primo livello non c'è quasi nulla — zero
+    byte, o i soli PDF se li si è generati.
+
+    Sta qui in alto e non accanto alle altre funzioni dei manga perché la
+    cronologia la usa mentre costruisce lo stato, molto prima.
+    """
+    try:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+    except OSError:
+        return 0
+
+
 def _leggi_cronologia() -> list[dict]:
     """Voci salvate dalle sessioni precedenti. Un file illeggibile non è un
     motivo per non far partire l'app: si riparte da una lista vuota."""
@@ -174,7 +191,17 @@ def _leggi_cronologia() -> list[dict]:
         dati = json.loads(CRONOLOGIA.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return [v for v in dati if isinstance(v, dict)][-MAX_CRONOLOGIA:]
+    voci = [v for v in dati if isinstance(v, dict)][-MAX_CRONOLOGIA:]
+
+    # Voci salvate quando la dimensione si calcolava senza scendere nelle
+    # sottocartelle: risultavano 0 byte pur essendo lì. Si ricalcolano, ma solo
+    # quelle a zero, così l'avvio non tocca il disco senza motivo.
+    for v in voci:
+        if not v.get("size") and v.get("path"):
+            cartella = Path(str(v["path"]))
+            if cartella.is_dir():
+                v["size"] = _peso_ricorsivo(cartella)
+    return voci
 
 
 def _scrivi_cronologia(voci: list[dict]) -> None:
@@ -778,15 +805,16 @@ def _descrizione_manga(
     formato: str,
 ) -> str:
     """Riga di dettaglio mostrata nella coda: quali capitoli e in che formato."""
+    # "Ch." è l'abbreviazione d'uso per i capitoli, come "E" per gli episodi:
+    # in una riga stretta "capitoli 12, 15, 18" mangia tutto lo spazio.
     if sparsi:
-        quali = ("capitolo " + str(sparsi[0])) if len(sparsi) == 1 else (
-            "capitoli " + ", ".join(str(n) for n in sparsi))
+        quali = "Ch. " + ", ".join(str(n) for n in sparsi)
     elif inizio and fine:
-        quali = f"capitoli {inizio}-{fine}" if inizio != fine else f"capitolo {inizio}"
+        quali = f"Ch. {inizio}-{fine}" if inizio != fine else f"Ch. {inizio}"
     elif inizio:
-        quali = f"dal capitolo {inizio}"
+        quali = f"dal Ch. {inizio}"
     elif fine:
-        quali = f"fino al capitolo {fine}"
+        quali = f"fino al Ch. {fine}"
     else:
         quali = "tutti i capitoli"
     return f"{quali} · {formato.upper()}" if formato else quali
@@ -863,13 +891,47 @@ def download_mangaworld(
             # Il numero vero del capitolo, quando lo si conosce: "Capitolo 7"
             # invece di "Capitolo 1 di 3" scaricando dal settimo in poi.
             reale = numeri[indice - 1] if 0 < indice <= len(numeri) else None
-            desc = (f"Capitolo {reale}" if reale is not None
-                    else f"Capitolo {indice} di {totale}")
+            desc = (f"Ch. {reale}" if reale is not None
+                    else f"Ch. {indice} di {totale}")
             if reale is not None and totale > 1:
                 desc += f" ({indice} di {totale})"
             state.tasks = {
                 0: {"desc": desc, "pct": min(pct, 100.0), "visible": True},
             }
+
+    # MangaWorld non dice quanti byte scarica: rich riporta solo percentuali.
+    # Si misura la cartella sul disco a intervalli regolari e se ne ricavano i
+    # dati scaricati e la velocità — gli stessi due numeri con cui
+    # l'interfaccia stima quanto manca e in quanto tempo, e con cui la barra
+    # dei menu mostra la velocità.
+    ferma_misura = threading.Event()
+    cartella_manga = base / titolo
+
+    # Quanto pesava la cartella prima di cominciare. Si conta solo ciò che
+    # questo download aggiunge: scaricando altri capitoli di un manga già
+    # avviato, contare tutto faceva partire la barra da "109 MB scaricati" con
+    # una velocità istantanea assurda al primo campionamento.
+    def peso() -> int:
+        return _peso_ricorsivo(cartella_manga) if cartella_manga.is_dir() else 0
+
+    partenza = peso()
+
+    def misura() -> None:
+        precedente, istante = partenza, time.time()
+        while not ferma_misura.wait(1.5):
+            try:
+                adesso = peso()
+            except OSError:
+                continue
+            ora = time.time()
+            trascorso = ora - istante
+            with state.lock:
+                state.bytes_now = max(adesso - partenza, 0)
+                if trascorso > 0 and adesso >= precedente:
+                    state.speed_bps = (adesso - precedente) / trascorso
+            precedente, istante = adesso, ora
+
+    threading.Thread(target=misura, daemon=True).start()
 
     try:
         run_mangaworld_download(
@@ -884,14 +946,20 @@ def download_mangaworld(
         )
     except MangaCancelled as exc:
         raise DownloadCancelled from exc
+    finally:
+        ferma_misura.set()
 
     with state.lock:
         state.overall["done"] = state.overall.get("total") or 0
-    cartella = base / titolo
+    # Nella cronologia va quanto ha portato questo download, non quanto pesa
+    # tutto il manga: la voce dice "Ch. 9-14", e mostrare accanto il peso dei
+    # capitoli 1-14 sarebbe una risposta a una domanda diversa.
+    aggiunti = max(peso() - partenza, 0)
     state.registra_completato({
         "label": titolo,
-        "path": str(cartella if cartella.is_dir() else base),
-        "size": folder_size(str(cartella)) if cartella.is_dir() else 0,
+        "detail": str(params.get("detail") or ""),
+        "path": str(cartella_manga if cartella_manga.is_dir() else base),
+        "size": aggiunti,
     })
     state.log(f"✅ Download di \"{titolo}\" completato.")
     return titolo
@@ -1058,7 +1126,14 @@ def download_vibravid(
     # elenco ci sono più voci della stessa serie.
     etichetta = f"{title} · {formato_selezione(params)}".rstrip(" ·")
 
-    state.registra_completato({"label": etichetta, "path": dest, "size": size})
+    # Titolo e selezione su due campi, non concatenati: la cronologia li mostra
+    # su due righe, come per i manga.
+    state.registra_completato({
+        "label": title or etichetta,
+        "detail": formato_selezione(params),
+        "path": dest,
+        "size": size,
+    })
     state.log(f"✅ Download di \"{etichetta}\" completato.")
     if not os.environ.get("GUI_NO_BROWSER"):
         notify(title)
@@ -1496,11 +1571,14 @@ class Handler(BaseHTTPRequestHandler):
             "format": str(data.get("format", "")).strip(),
             "path": str(data.get("path", "")).strip(),
         }
+        # La stessa riga serve tre volte: in coda, sotto il titolo mentre
+        # scarica e nella cronologia. Si calcola una volta sola.
+        params["detail"] = _descrizione_manga(
+            inizio, fine, params["chapters"], params["format"])
         error = start_job(
             lambda cancel: download_mangaworld(params, STATE, cancel),
             label=params["title"] or "Manga",
-            detail=_descrizione_manga(inizio, fine, params["chapters"],
-                                      params["format"]),
+            detail=params["detail"],
         )
         return {"error": error} if error else {"ok": True}
 

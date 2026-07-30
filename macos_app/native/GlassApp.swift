@@ -58,7 +58,25 @@ struct CompletedRow: Decodable, Identifiable {
     var label: String
     var path: String
     var size: Double
-    var id: String { path + label }
+    /// Che cosa è stato scaricato: "capitoli 2, 4 · PDF", "S01 · E03"…
+    var detail: String = ""
+    /// Quando, in secondi dal 1970. Manca nelle voci salvate prima che la
+    /// cronologia esistesse, quindi è opzionale.
+    var when: Double? = nil
+    var id: String { "\(path)|\(label)|\(when ?? 0)" }
+
+    /// Solo il giorno, senza ora: in una cronologia serve sapere quando più o
+    /// meno, non il minuto esatto.
+    var quando: String {
+        guard let t = when else { return "" }
+        let data = Date(timeIntervalSince1970: t)
+        if Calendar.current.isDateInToday(data) { return "oggi" }
+        if Calendar.current.isDateInYesterday(data) { return "ieri" }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "it_IT")
+        f.dateFormat = "d MMM"
+        return f.string(from: data)
+    }
 }
 
 struct ServerState: Decodable {
@@ -1631,7 +1649,12 @@ struct ActiveDownloadRow: View {
         stato == .inactive ? Color.secondary.opacity(0.55) : accent
     }
 
-    var contaEpisodi: Bool { (model.state.overall.unit ?? "episodi") == "episodi" }
+    /// Unità che si contano una per una, e meritano la barra a segmenti.
+    /// I capitoli di un manga si comportano come gli episodi; le tracce di
+    /// VibraVid (video, audio, sottotitoli) no, quelle sono un episodio solo.
+    var contaEpisodi: Bool {
+        ["episodi", "capitoli"].contains(model.state.overall.unit ?? "episodi")
+    }
     var totali: Int { max(Int(model.state.overall.total), 1) }
     var fatti: Int { contaEpisodi ? Int(model.state.overall.done) : 0 }
     var multi: Bool { contaEpisodi && totali > 1 }
@@ -1647,14 +1670,21 @@ struct ActiveDownloadRow: View {
         return min((Double(fatti) + pctCorrente) / Double(totali), 1)
     }
 
-    /// Codice dell'episodio in corso, es. "S01 E04".
+    /// Pastiglia con l'elemento in corso: "S01 E04" per le serie, "Capitolo 7"
+    /// per i manga.
     var episodio: String {
         let d = model.state.episodes.first?.desc ?? ""
         // Accetta sia "S01E01" sia "S01 · E01": aggiungendo il pallino fra
         // stagione ed episodio la vecchia forma non corrispondeva più e la
         // pastiglia spariva senza segnalare nulla.
         let forma = #"^S\d+\s*(·\s*)?E\d+"#
-        return d.range(of: forma, options: .regularExpression) != nil ? d : ""
+        if d.range(of: forma, options: .regularExpression) != nil { return d }
+        // Dei manga si prende il solo "Ch. 7": il "(2 di 5)" che segue lo dice
+        // già il contatore accanto alla barra, e ripeterlo è rumore.
+        if let r = d.range(of: #"^Ch\.\s*\d+"#, options: .regularExpression) {
+            return String(d[r])
+        }
+        return ""
     }
 
     var dettaglio: String {
@@ -1833,8 +1863,13 @@ struct DownloadsSection: View {
                         .background(.green.opacity(0.15), in: .rect(cornerRadius: 9))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(c.label).font(.callout).lineLimit(1)
-                        Text("Completato · \(fmtBytes(c.size))")
-                            .font(.caption).foregroundStyle(.secondary)
+                        // Che cosa, quanto e quando: "capitoli 2, 4 · PDF" da
+                        // solo non basta a ritrovarsi dentro una cronologia
+                        // lunga, e la sola dimensione non dice cosa contiene.
+                        Text([c.detail, fmtBytes(c.size), c.quando]
+                                .filter { !$0.isEmpty }
+                                .joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
                     Button("Apri nel Finder") { model.open(path: c.path) }
