@@ -73,6 +73,7 @@ except Exception:  # noqa: BLE001
 try:
     from vibravid_downloads import (
         apri_nel_lettore as vibravid_apri_lettore,
+        etichetta_media as vibravid_etichetta,
         lettore_disponibile as vibravid_lettore,
         risolvi_flusso as vibravid_risolvi,
         sito_riproducibile as vibravid_riproducibile,
@@ -113,7 +114,10 @@ except Exception:  # noqa: BLE001
     def vibravid_risolvi(params: dict) -> dict:  # noqa: ARG001
         return {"error": "Funzione non disponibile."}
 
-    def vibravid_apri_lettore(indirizzo: str) -> str | None:  # noqa: ARG001
+    def vibravid_etichetta(params: dict) -> str:  # noqa: ARG001
+        return ""
+
+    def vibravid_apri_lettore(indirizzo: str, titolo: str = "") -> str | None:  # noqa: ARG001
         return "Funzione non disponibile."
 
     class VibravidCancelled(Exception):
@@ -1187,8 +1191,6 @@ class Handler(BaseHTTPRequestHandler):
         params = {
             "site": site,
             "query": str(data.get("query", "")).strip(),
-            # Serve a cercare il file giusto quando è già scaricato: senza il
-            # titolo il solo codice episodio trovava la prima serie qualsiasi.
             "title": str(data.get("title", "")).strip(),
             "item": str(data.get("item", "")).strip(),
             "season": str(data.get("season", "")).strip(),
@@ -1201,15 +1203,12 @@ class Handler(BaseHTTPRequestHandler):
         if "error" in esito:
             return esito
 
-        indirizzo = esito.get("file") or esito.get("url", "")
-        errore = vibravid_apri_lettore(indirizzo)
+        etichetta = vibravid_etichetta(params)
+        errore = vibravid_apri_lettore(esito.get("url", ""), etichetta)
         if errore:
             return {"error": errore}
-        STATE.log(
-            "▶️ Riproduzione in IINA: "
-            + ("file già scaricato" if esito.get("file") else "flusso remoto")
-        )
-        return {"ok": True, "locale": bool(esito.get("file"))}
+        STATE.log(f"▶️ Riproduzione in IINA: {etichetta or 'flusso remoto'}")
+        return {"ok": True}
 
     def _handle_ytdlp_formats(self, data: dict) -> dict:
         if not ytdlp_available():

@@ -36,6 +36,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Callable
@@ -255,52 +256,12 @@ def _coda_privata() -> Path:
     return CONF_PRIVATA / ".cache" / "queue"
 
 
-_VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".avi")
-
-
-def _cerca_file_locale(radice: Path, codice: str, titolo: str = "") -> Path | None:
-    """File già scaricato di QUESTA serie con QUESTO codice episodio.
-
-    Il titolo è indispensabile: cercando il solo "S01E01" si trovava il primo
-    episodio di una serie qualsiasi (chiedendo House of Cards usciva House of
-    the Dragon). Vengono ignorate le cartelle nascoste, dove stanno i file
-    parziali dei download interrotti: aprirli darebbe errore.
-    """
-    partenza = radice
-    if titolo:
-        # La cartella della serie ha il titolo, a meno di caratteri sostituiti.
-        candidate = [d for d in radice.glob("*")
-                     if d.is_dir() and not d.name.startswith(".")
-                     and _somiglia(d.name, titolo)]
-        if candidate:
-            partenza = candidate[0]
-        elif any(radice.glob("*")):
-            return None      # la serie non è stata scaricata qui
-
-    try:
-        for f in partenza.rglob("*"):
-            if any(p.startswith(".") for p in f.parts):
-                continue     # dentro una cartella temporanea: file parziale
-            if (f.is_file() and f.suffix.lower() in _VIDEO_EXT
-                    and codice.lower() in f.name.lower().replace(" ", "")):
-                return f
-    except OSError:
-        return None
-    return None
-
-
-def _somiglia(a: str, b: str) -> bool:
-    """Confronto tollerante fra nomi di cartella e titoli."""
-    pulisci = lambda s: "".join(c for c in s.lower() if c.isalnum())  # noqa: E731
-    x, y = pulisci(a), pulisci(b)
-    return bool(x) and bool(y) and (x in y or y in x)
-
-
 def risolvi_flusso(params: dict) -> dict:
-    """Ottiene l'indirizzo riproducibile senza scaricare.
+    """Ottiene l'indirizzo del flusso remoto, senza scaricare.
 
-    Ritorna ``{"url": …}`` per il flusso remoto, ``{"file": …}`` se l'episodio
-    è già sul disco (meglio aprire quello), oppure ``{"error": …}``.
+    Ritorna ``{"url": …}`` oppure ``{"error": …}``. Il ▶︎ va sempre in
+    streaming, anche se il titolo è già sul disco: aprire la copia locale non
+    è compito suo.
     """
     if not vibravid_available():
         return {"error": "VibraVid non è disponibile."}
@@ -325,21 +286,29 @@ def risolvi_flusso(params: dict) -> dict:
     base_conf = prepara_config()
     if base_conf is not None:
         env["VIBRAVID_BASE_PATH"] = str(base_conf)
-    destinazione = output_root(str(params.get("path", "")).strip() or None)
-    env["VIBRAVID_OUTPUT_ROOT"] = str(destinazione)
+    # Cartella di uscita finta: vuota, usa e getta.
+    #
+    # VibraVid controlla se il file è già sul disco PRIMA di guardare
+    # --resolve-only (core/downloader/hls.py): se lo trova esce subito e non
+    # mette mai in coda l'indirizzo, e il ▶︎ smette di funzionare proprio sui
+    # titoli già scaricati. Qui non si scarica nulla, quindi la cartella di
+    # uscita è irrilevante: dandogliene una vuota il controllo non scatta e il
+    # flusso viene risolto sempre.
+    scratch = Path(tempfile.mkdtemp(prefix="vault-resolve-"))
+    env["VIBRAVID_OUTPUT_ROOT"] = str(scratch)
 
     coda = _coda_privata()
     prima = set(coda.glob("*.json")) if coda.is_dir() else set()
 
     try:
-        proc = subprocess.run(  # noqa: S603
+        subprocess.run(  # noqa: S603
             argv, cwd=str(base), stdin=subprocess.DEVNULL, capture_output=True,
             text=True, timeout=240, env=env, check=False,
         )
     except (subprocess.TimeoutExpired, OSError):
         return {"error": "La risoluzione del flusso non ha risposto in tempo."}
-
-    uscita = (proc.stdout or "") + (proc.stderr or "")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     # Nuovo file di coda: dentro c'è l'indirizzo del flusso.
     nuovi = (set(coda.glob("*.json")) - prima) if coda.is_dir() else set()
@@ -357,29 +326,72 @@ def risolvi_flusso(params: dict) -> dict:
         except (OSError, ValueError, IndexError):
             continue
 
-    # Già scaricato: VibraVid non risolve nulla, ma il file c'è.
-    if "already exists" in uscita.lower():
-        stagione = str(params.get("season", "")).strip()
-        episodio = str(params.get("episode", "")).strip()
-        if stagione.isdigit() and episodio.isdigit():
-            codice = f"S{int(stagione):02d}E{int(episodio):02d}"
-            titolo = str(params.get("title") or params.get("query") or "")
-            trovato = _cerca_file_locale(destinazione, codice, titolo)
-            if trovato:
-                return {"file": str(trovato)}
-        return {"error": "L'episodio risulta già scaricato ma non l'ho trovato."}
-
     return {"error": "Non sono riuscito a ottenere il flusso da questo sito."}
 
 
-def apri_nel_lettore(indirizzo: str) -> str | None:
+# Binario a riga di comando incluso in IINA. Serve perché "open -a" non
+# permette di passare opzioni a mpv, e senza quelle lo streaming salta.
+_IINA_CLI = Path("/Applications/IINA.app/Contents/MacOS/iina-cli")
+
+# Opzioni mpv per la riproduzione di un flusso remoto.
+#
+# Di serie il demuxer HLS di FFmpeg non riprova a scaricare un segmento
+# fallito: registra un avviso, incrementa il numero di sequenza e passa al
+# successivo senza pausa (``seg_max_retry`` vale 0). I segmenti durano 4
+# secondi, quindi un singhiozzo di rete di un paio di secondi ne consuma
+# quattro o cinque di fila e la riproduzione salta avanti di una ventina di
+# secondi, in silenzio e senza errori. Con ``seg_max_retry`` il segmento viene
+# richiesto di nuovo invece di essere scartato.
+#
+# ``rw_timeout`` è una delle poche opzioni che il demuxer HLS propaga alle
+# richieste dei singoli segmenti: senza, una connessione che si pianta resta
+# appesa invece di fallire e far scattare il nuovo tentativo. La cache più
+# ampia assorbe i rallentamenti temporanei della CDN.
+_MPV_STREAMING = (
+    "--mpv-demuxer-lavf-o=seg_max_retry=10",
+    "--mpv-stream-lavf-o=rw_timeout=10000000",   # 10 s, in microsecondi
+    "--mpv-cache=yes",
+    "--mpv-cache-secs=120",
+    "--mpv-demuxer-max-bytes=200MiB",
+)
+
+
+def etichetta_media(params: dict) -> str:
+    """Nome leggibile del titolo, per la finestra del lettore.
+
+    In streaming IINA non ha un nome file da mostrare e ripiega sull'ultimo
+    pezzo dell'indirizzo, cioè l'id della playlist con token ed expires
+    appresso. Meglio dirgli noi come si chiama.
+    """
+    titolo = str(params.get("title") or params.get("query") or "").strip()
+    stagione = str(params.get("season", "")).strip()
+    episodio = str(params.get("episode", "")).strip()
+    if titolo and stagione.isdigit() and episodio.isdigit():
+        return f"{titolo} S{int(stagione):02d}E{int(episodio):02d}"
+    return titolo                          # film: basta il titolo
+
+
+def apri_nel_lettore(indirizzo: str, titolo: str = "") -> str | None:
     """Apre indirizzo o file in IINA. Ritorna un messaggio d'errore o None."""
     if not lettore_disponibile():
         return "IINA non è installato."
-    # "open -a" e non iina-cli: quest'ultimo non digerisce gli indirizzi con
-    # parametri di query (token, expires…) e risponde "Impossibile aprire il
-    # file o lo stream", mentre lo stesso indirizzo passato così si riproduce.
-    comando = ["open", "-a", "IINA", indirizzo]
+
+    if _IINA_CLI.exists():
+        # "--no-stdin" è indispensabile: senza, iina-cli cerca di leggere lo
+        # standard input e resta appeso a tempo indefinito. Era questo a farlo
+        # fallire, non i parametri di query nell'indirizzo: passando l'opzione,
+        # gli indirizzi con token ed expires si riproducono senza problemi.
+        comando = [str(_IINA_CLI), "--no-stdin"]
+        if indirizzo.startswith(("http://", "https://")):
+            comando += _MPV_STREAMING     # su un file locale non servirebbero
+        if titolo:
+            comando.append(f"--mpv-force-media-title={titolo}")
+        comando.append(indirizzo)
+    else:
+        # IINA presente ma senza binario a riga di comando: si ripiega su
+        # "open", che riproduce lo stesso ma senza poter regolare mpv.
+        comando = ["open", "-a", "IINA", indirizzo]
+
     try:
         subprocess.Popen(  # noqa: S603
             comando, stdin=subprocess.DEVNULL,
