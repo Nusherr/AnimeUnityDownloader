@@ -167,12 +167,22 @@ struct VibraResult: Decodable, Identifiable {
 
     enum CodingKeys: String, CodingKey { case name, type, year }
 
+    /// I siti non parlano lo stesso vocabolario: streamingcommunity risponde
+    /// "tv" e "movie" minuscoli, animeunity "TV", "Movie", "ONA", "Special".
+    /// Al flusso interessa una sola distinzione — film oppure no — e va fatta
+    /// senza badare alle maiuscole, altrimenti su animeunity nessun confronto
+    /// va mai a segno e perfino i film finiscono trattati da serie.
+    var isMovie: Bool {
+        ["movie", "film"].contains(type.lowercased())
+    }
+
+    /// Etichetta mostrata accanto al titolo nei risultati. "ONA" e "Special"
+    /// dicono qualcosa a chi cerca anime, quindi si conservano invece di
+    /// appiattirle tutte su "serie".
     var kind: String {
-        switch type {
-        case "tv": return "serie"
-        case "movie": return "film"
-        default: return type
-        }
+        if isMovie { return "film" }
+        let t = type.lowercased()
+        return (t.isEmpty || t == "tv") ? "serie" : t
     }
 }
 
@@ -676,6 +686,36 @@ struct VibraPane: View {
     @State private var allEpisodes = true
     @State private var pickedEpisodes: Set<Int> = []
 
+    // Siti senza stagioni (animeunity, animeworld): di quelle serie si conosce
+    // soltanto quanti episodi ci sono, non i loro nomi né le durate. Si sceglie
+    // quindi per numero, con lo stesso comando che la scheda AnimeUnity già usa.
+    @State private var flatCount: Int? = nil
+    @State private var flatMode = "all"        // all | range | list
+    @State private var flatStart = ""
+    @State private var flatEnd = ""
+    @State private var flatList = ""
+
+    var isFlat: Bool { flatCount != nil }
+
+    /// La selezione degli episodi nella sintassi di VibraVid: "*", "3-7", "1,4,9".
+    /// Un estremo vuoto nell'intervallo significa "dall'inizio" o "fino alla fine".
+    var flatSelection: String {
+        switch flatMode {
+        case "range":
+            let a = flatStart.trimmingCharacters(in: .whitespaces)
+            let b = flatEnd.trimmingCharacters(in: .whitespaces)
+            if a.isEmpty && b.isEmpty { return "*" }
+            return "\(a.isEmpty ? "1" : a)-\(b.isEmpty ? "*" : b)"
+        case "list":
+            let n = flatList.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && Int($0) != nil }
+            return n.joined(separator: ",")
+        default:
+            return "*"
+        }
+    }
+
     // Lingua e sottotitoli: solo italiano e inglese, il resto si ignora.
     // Di partenza audio italiano e nessun sottotitolo.
     @State private var audio = "ita"
@@ -697,13 +737,26 @@ struct VibraPane: View {
             return false
         }
         if isMovie { return true }
+        // Sito piatto: un episodio solo, cioè "Specifici" con un numero dentro.
+        if isFlat { return flatMode == "list" && Int(flatSelection) != nil }
         guard isSeries, !allSeasons, selectedSeason != nil else { return false }
         return !allEpisodes && pickedEpisodes.count == 1
     }
 
     var isSeries: Bool { !isMovie && !seasons.isEmpty }
+
+    /// Quanti passi numerati vengono prima di "Lingua e sottotitoli". Non è
+    /// sempre il quarto: un film non ha né stagione né episodi, un sito senza
+    /// stagioni ha solo gli episodi, e chi sceglie tutte le stagioni salta la
+    /// scelta degli episodi. Fissarlo a "4" faceva saltare la numerazione.
+    var passoLingua: String {
+        if isMovie { return "2" }
+        if isFlat || allSeasons { return "3" }
+        return "4"
+    }
     var canDownload: Bool {
         guard chosen != nil else { return false }
+        if isFlat { return !flatSelection.isEmpty }        // serve una selezione valida
         if !isSeries { return true }                       // film: basta il titolo
         if allSeasons { return true }                      // tutte le stagioni
         guard selectedSeason != nil else { return false }  // serve una stagione
@@ -793,6 +846,38 @@ struct VibraPane: View {
                         Text("\(chosenTitle) è un film: nessuna stagione da scegliere.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
+                } else if isFlat {
+                    // Sito senza stagioni: si passa dritti agli episodi. Di
+                    // loro si sa solo quanti sono — niente nomi, niente durate
+                    // — quindi si scelgono per numero invece che a pastiglie:
+                    // con 1171 episodi una griglia sarebbe comunque inservibile.
+                    VStack(alignment: .leading, spacing: 7) {
+                        stepLabel("2", "Scegli gli episodi",
+                                  detail: "\(flatCount ?? 0) episodi, questo sito non ha stagioni")
+                        GlassSegmented(selection: $flatMode, options: [
+                            SegOption(id: "all", label: "Tutti"),
+                            SegOption(id: "range", label: "Intervallo"),
+                            SegOption(id: "list", label: "Specifici"),
+                        ])
+                        if flatMode == "range" {
+                            HStack(spacing: 10) {
+                                Text("da").foregroundStyle(.secondary)
+                                TextField("1", text: $flatStart).frame(width: 62)
+                                Text("a").foregroundStyle(.secondary)
+                                TextField("\(flatCount ?? 0)", text: $flatEnd).frame(width: 62)
+                                Text("vuoto = dall'inizio / fino alla fine")
+                                    .font(.caption).foregroundStyle(.tertiary)
+                            }
+                            .textFieldStyle(.roundedBorder)
+                        } else if flatMode == "list" {
+                            HStack(spacing: 10) {
+                                TextField("3, 7, 12", text: $flatList).frame(width: 180)
+                                    .textFieldStyle(.roundedBorder)
+                                Text("numeri separati da virgola")
+                                    .font(.caption).foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
                 } else if !seasons.isEmpty {
                     VStack(alignment: .leading, spacing: 7) {
                         stepLabel("2", "Scegli la stagione",
@@ -849,9 +934,9 @@ struct VibraPane: View {
             }
 
             // ---- 4. Lingua e sottotitoli, una volta scelto cosa scaricare
-            if chosen != nil && (isMovie || allSeasons || selectedSeason != nil) {
+            if chosen != nil && (isMovie || isFlat || allSeasons || selectedSeason != nil) {
                 VStack(alignment: .leading, spacing: 7) {
-                    stepLabel("4", "Lingua e sottotitoli", detail: "italiano o inglese")
+                    stepLabel(passoLingua, "Lingua e sottotitoli", detail: "italiano o inglese")
                     HStack(spacing: 14) {
                         HStack(spacing: 6) {
                             Text("Audio").font(.caption).foregroundStyle(.secondary)
@@ -931,6 +1016,12 @@ struct VibraPane: View {
 
     var riepilogo: String {
         guard !chosenTitle.isEmpty else { return "" }
+        if isFlat {
+            let quali = flatSelection == "*"
+                ? "tutti i \(flatCount ?? 0) episodi"
+                : "episodi \(flatSelection)"
+            return "\(chosenTitle) · \(quali)" + lingue
+        }
         if !isSeries { return chosenTitle + lingue }
         if allSeasons {
             return "\(chosenTitle) · tutte le \(seasons.count) stagioni" + lingue
@@ -965,6 +1056,12 @@ struct VibraPane: View {
         seasons = []; isMovie = false; allSeasons = false; selectedSeason = nil
         seasonsError = nil
         episodes = []; allEpisodes = true; pickedEpisodes = []
+        resetFlat()
+    }
+
+    func resetFlat() {
+        flatCount = nil; flatMode = "all"
+        flatStart = ""; flatEnd = ""; flatList = ""
     }
 
     func choose(_ r: VibraResult) {
@@ -974,14 +1071,16 @@ struct VibraPane: View {
         seasons = []; isMovie = false; allSeasons = false; selectedSeason = nil
         seasonsError = nil
         episodes = []; allEpisodes = true; pickedEpisodes = []
+        resetFlat()
 
         // Un film non ha stagioni, e la ricerca l'ha già detto: è la stessa
         // fonte che scrive "· film" nella riga qui sopra, e loadSeasons() la
         // tratta comunque come autorevole. Chiedere le stagioni al server
         // significava aspettare un giro in rete intero per farsi rispondere
         // "nessuna stagione" e concludere quello che si sapeva già in partenza.
-        // Qualunque altro tipo continua a passare dal server come prima.
-        if r.type == "movie" {
+        // Il confronto passa da isMovie, che ignora le maiuscole: su animeunity
+        // il tipo arriva come "Movie" e un confronto letterale non scattava mai.
+        if r.isMovie {
             isMovie = true
             return
         }
@@ -1060,12 +1159,18 @@ struct VibraPane: View {
             seasons = out
 
             if out.isEmpty {
-                // La ricerca ha già detto se è film o serie: quella è la fonte
-                // autorevole. Se dice "serie" ma non arrivano stagioni, è un
-                // guasto, non un film.
-                if chosenKind == "movie" {
+                // Nessuna stagione: tre casi distinti, e confonderli era il
+                // motivo per cui su animeunity non si caricava nulla.
+                if obj["flat"] as? Bool == true {
+                    // Il sito le stagioni non le ha proprio: la serie è un
+                    // elenco unico di episodi, di cui si conosce solo quanti
+                    // sono. Si scelgono per numero, più avanti.
+                    isMovie = false
+                    flatCount = obj["count"] as? Int ?? 0
+                } else if obj["movie"] as? Bool == true {
                     isMovie = true
                 } else {
+                    // Il server non sa dire cos'è: è un guasto, e va detto.
                     isMovie = false
                     seasonsError = "Non sono riuscito a leggere le stagioni di "
                         + "\"\(chosenTitle)\". Riprova, oppure scegli un altro sito."
@@ -1102,15 +1207,31 @@ struct VibraPane: View {
 
     /// Risolve il flusso e lo apre in IINA, senza scaricare nulla.
     func guarda() {
-        guard let item = chosen, let s = selectedSeason ?? (isMovie ? 0 : nil)
-        else { return }
+        guard let item = chosen else { return }
+
+        // Cosa mandare dipende da com'è fatto il titolo: un film non ha né
+        // stagione né episodio, un sito senza stagioni ha solo l'episodio, una
+        // serie normale li ha entrambi.
+        let stagione: String
+        let episodio: String
+        if isMovie {
+            stagione = ""; episodio = ""
+        } else if isFlat {
+            stagione = ""; episodio = flatSelection
+        } else if let s = selectedSeason {
+            stagione = String(s)
+            episodio = pickedEpisodes.first.map(String.init) ?? ""
+        } else {
+            return
+        }
+
         apreLettore = true
         Task {
             await model.post("/vibravid_watch", [
                 "site": site, "query": query, "title": chosenTitle,
                 "item": String(item),
-                "season": isMovie ? "" : String(s),
-                "episode": pickedEpisodes.first.map(String.init) ?? "",
+                "season": stagione,
+                "episode": episodio,
                 "audio": audio, "subtitle": sottotitoli,
                 "path": model.destination,
             ])
@@ -1122,7 +1243,12 @@ struct VibraPane: View {
         // "*" è la sintassi di VibraVid per "tutto".
         var seasonArg = ""
         var episodeArg = ""
-        if isSeries {
+        if isFlat {
+            // Sito senza stagioni: la stagione resta vuota. Il downloader di
+            // questi siti accetta il parametro ma non lo guarda nemmeno —
+            // gli serve solo la selezione degli episodi.
+            episodeArg = flatSelection
+        } else if isSeries {
             if allSeasons {
                 seasonArg = "*"
                 episodeArg = "*"

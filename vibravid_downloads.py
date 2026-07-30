@@ -50,6 +50,9 @@ _NON_SITE_DIRS = {"_base", "__pycache__", "discovery"}
 # Sequenze ANSI (colori/movimenti cursore di rich) da togliere dall'output.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
+# Riga con cui i siti senza stagioni annunciano quanti episodi ci sono.
+_CONTA_EPISODI_RE = re.compile(r"Episodes count:\s*(\d+)")
+
 # Riga di avanzamento: "<etichetta> ---> | 56.9M / 77.5M · 24.89M/s · 00:01"
 _PROGRESS_RE = re.compile(
     r"^(?P<label>.*?)\s*[-> ]*\|\s*"
@@ -368,6 +371,9 @@ def etichetta_media(params: dict) -> str:
     episodio = str(params.get("episode", "")).strip()
     if titolo and stagione.isdigit() and episodio.isdigit():
         return f"{titolo} S{int(stagione):02d}E{int(episodio):02d}"
+    if titolo and episodio.isdigit():
+        # Siti senza stagioni: c'è solo il numero dell'episodio.
+        return f"{titolo} · Ep {int(episodio)}"
     return titolo                          # film: basta il titolo
 
 
@@ -660,12 +666,18 @@ def _probe(site: str, query: str, item: str, season: str | None) -> str:
 
 
 def list_seasons(site: str, query: str, item: str) -> dict:
-    """Elenco delle stagioni di un titolo. ``{"seasons": [...]}`` o ``{"error": ...}``."""
+    """Com'è strutturato il titolo scelto.
+
+    Ritorna ``{"seasons": [...]}`` per le serie divise in stagioni,
+    ``{"flat": True, "count": N}`` per i siti che le stagioni non le hanno e
+    passano dritti agli episodi, ``{"movie": True}`` per i film, oppure
+    ``{"error": ...}``.
+    """
     if not vibravid_available():
         return {"error": "VibraVid non è disponibile."}
     key = ("s", site, query, str(item))
     if key in _CACHE:
-        return {"seasons": _CACHE[key]}
+        return dict(_CACHE[key])
 
     output = _probe(site, query, item, None)
     if not output:
@@ -677,11 +689,24 @@ def list_seasons(site: str, query: str, item: str) -> dict:
         # la tabella delle stagioni ha 3 colonne: indice, nome, id
         if len(r) >= 2
     ]
-    if not seasons:
-        # Nessuna tabella: con ogni probabilità è un film, non una serie.
-        return {"seasons": [], "movie": True}
-    _CACHE[key] = seasons
-    return {"seasons": seasons}
+    if seasons:
+        esito = {"seasons": seasons}
+    else:
+        # Nessuna tabella: due casi diversi che prima si confondevano.
+        #
+        # Su certi siti — animeunity e animeworld fra quelli provati — le
+        # stagioni non esistono proprio: VibraVid salta quel passo e chiede
+        # subito il numero dell'episodio, annunciando solo quanti ce ne sono
+        # ("Episodes count: 1171"). Lì "nessuna stagione" vuol dire struttura
+        # piatta, non film, e scambiarla per un film faceva fallire il
+        # caricamento su ogni serie di quei siti.
+        #
+        # Un film vero, invece, non annuncia alcun conteggio.
+        conta = _CONTA_EPISODI_RE.search(_ANSI_RE.sub("", output))
+        esito = ({"seasons": [], "flat": True, "count": int(conta.group(1))}
+                 if conta else {"seasons": [], "movie": True})
+    _CACHE[key] = esito
+    return dict(esito)
 
 
 def list_episodes(site: str, query: str, item: str, season: str) -> dict:
