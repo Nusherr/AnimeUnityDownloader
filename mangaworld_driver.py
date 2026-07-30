@@ -40,6 +40,29 @@ def _prepara_percorso(progetto: Path) -> None:
     sys.path.insert(0, str(progetto))
 
 
+def _conta(url: str, extract_manga_info, fetch_page) -> int:  # noqa: ANN001
+    """Stampa nome e numero di capitoli, con una sola richiesta.
+
+    Non si usa il loro ``extract_chapters_info``: quello, per ogni capitolo,
+    ne apre la pagina per contarne le immagini — trecento capitoli, trecento
+    richieste, e qui serve solo sapere quanti sono. Il selettore è però lo
+    stesso che usano loro, così i due conteggi non possono divergere.
+    """
+    import json
+
+    async def leggi() -> None:
+        _, nome, _ = extract_manga_info(url)
+        soup = await fetch_page(url)
+        voci = [
+            a for a in soup.find_all("a", {"class": "chap", "title": True})
+            if "/read/" in (a.get("href") or "")
+        ]
+        print(json.dumps({"nome": nome, "capitoli": len(voci)}, ensure_ascii=False))
+
+    asyncio.run(leggi())
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Ponte fra Vault e MangaWorldDownloader.")
     ap.add_argument("--progetto", required=True, help="cartella di MangaWorldDownloader")
@@ -47,8 +70,12 @@ def main() -> int:
     ap.add_argument("--start", type=int, default=None)
     ap.add_argument("--end", type=int, default=None)
     ap.add_argument("--formato", default=None, choices=["pdf", "cbz"])
-    ap.add_argument("--destinazione", required=True)
+    ap.add_argument("--destinazione", default="")
+    ap.add_argument("--conta", action="store_true",
+                    help="stampa quanti capitoli ha il manga, senza scaricare")
     args = ap.parse_args()
+    if not args.conta and not args.destinazione:
+        ap.error("--destinazione è obbligatoria quando si scarica")
 
     progetto = Path(args.progetto).expanduser().resolve()
     if not (progetto / "manga_downloader.py").exists():
@@ -59,7 +86,14 @@ def main() -> int:
     # L'ordine degli import conta: gli altri moduli leggono DOWNLOAD_FOLDER per
     # valore nel momento in cui vengono importati, quindi va sostituito prima.
     import src.config as cfg
-    cfg.DOWNLOAD_FOLDER = str(Path(args.destinazione).expanduser())
+    if args.destinazione:
+        cfg.DOWNLOAD_FOLDER = str(Path(args.destinazione).expanduser())
+
+    from src.format_utils import extract_manga_info
+    from src.general_utils import fetch_page
+
+    if args.conta:
+        return _conta(args.url, extract_manga_info, fetch_page)
 
     from manga_downloader import download_chapter_with_progress
     from src.crawler_utils import (
@@ -67,8 +101,7 @@ def main() -> int:
         extract_download_links,
         extract_manga_type,
     )
-    from src.format_utils import extract_manga_info
-    from src.general_utils import fetch_page, validate_index_range
+    from src.general_utils import validate_index_range
 
     async def esegui() -> None:
         _, nome, slug = extract_manga_info(args.url)

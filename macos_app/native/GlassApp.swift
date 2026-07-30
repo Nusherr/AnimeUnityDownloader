@@ -698,6 +698,15 @@ struct OtherPane: View {
     }
 }
 
+/// Riga di attesa con rotellina: la usano sia VibraVid sia MangaWorld mentre
+/// interrogano il sito, e conviene che siano identiche.
+func loadingRow(_ text: String) -> some View {
+    HStack(spacing: 8) {
+        ProgressView().controlSize(.small)
+        Text(text).foregroundStyle(.secondary).font(.callout)
+    }
+}
+
 // --------------------------------------------------------------- MangaWorld
 /// Scheda MangaWorld: si incolla il link del manga e si scelgono i capitoli.
 ///
@@ -706,12 +715,21 @@ struct OtherPane: View {
 /// il loro downloader apre una selezione interattiva a terminale, che qui
 /// resterebbe appesa in attesa di una risposta che nessuno può dare.
 struct MangaPane: View {
+    @Environment(\.controlActiveState) private var stato
     @ObservedObject var model: AppModel
     @State private var url = ""
     @State private var mode = "all"          // all | range
     @State private var start = ""
     @State private var end = ""
     @State private var formato = ""          // "" | pdf | cbz
+
+    // Quanti capitoli ha il manga incollato. Si legge da solo poco dopo che si
+    // smette di scrivere: senza, l'intervallo si compila a indovinare.
+    @State private var capitoli: Int? = nil
+    @State private var nomeLetto = ""
+    @State private var leggendo = false
+    @State private var erroreLettura: String? = nil
+    @State private var lettura: Task<Void, Never>? = nil
 
     var pronto: Bool {
         guard url.hasPrefix("http") else { return false }
@@ -721,19 +739,69 @@ struct MangaPane: View {
             || !end.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
-    /// Nome leggibile ricavato dall'indirizzo, per l'etichetta della coda.
-    /// Gli URL di MangaWorld finiscono con "/manga/<id>/<nome-del-manga>".
+    /// Nome del manga: quello letto dal sito se è arrivato, altrimenti ricavato
+    /// dall'indirizzo, che finisce con "/manga/<id>/<nome-del-manga>".
     var titolo: String {
+        if !nomeLetto.isEmpty { return nomeLetto }
         guard let ultimo = url.split(separator: "/").last, !ultimo.isEmpty else {
             return "Manga"
         }
         return ultimo.replacingOccurrences(of: "-", with: " ").capitalized
     }
 
+    /// Rilegge il conteggio dopo una pausa nella digitazione, così incollando
+    /// un indirizzo non si manda una richiesta per ogni carattere.
+    func programmaLettura() {
+        lettura?.cancel()
+        capitoli = nil; nomeLetto = ""; erroreLettura = nil
+        let indirizzo = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard indirizzo.hasPrefix("http") else { leggendo = false; return }
+
+        lettura = Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            if Task.isCancelled { return }
+            leggendo = true
+            let obj = await model.post("/mangaworld_info", ["url": indirizzo])
+            if Task.isCancelled { return }
+            leggendo = false
+            if let err = obj["error"] as? String {
+                erroreLettura = err
+            } else {
+                capitoli = obj["count"] as? Int
+                nomeLetto = (obj["name"] as? String) ?? ""
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             TextField("Incolla il link del manga da MangaWorld…", text: $url)
                 .textFieldStyle(.roundedBorder).controlSize(.large)
+                .onChange(of: url) { _, _ in programmaLettura() }
+
+            // Esito della lettura: quanti capitoli ci sono, o perché non si sa.
+            if leggendo {
+                loadingRow("Leggo i capitoli…")
+            } else if let n = capitoli {
+                HStack(spacing: 9) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(accento(stato))
+                    Text(nomeLetto.isEmpty ? "Manga trovato" : nomeLetto)
+                        .font(.callout.weight(.medium)).lineLimit(1)
+                    Text(n == 1 ? "· 1 capitolo" : "· \(n) capitoli")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(accento(stato).opacity(0.14), in: .rect(cornerRadius: 9))
+            } else if let err = erroreLettura {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(err).font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
 
             HStack(spacing: 12) {
                 Text("Capitoli").font(.caption).foregroundStyle(.secondary)
@@ -750,8 +818,13 @@ struct MangaPane: View {
                     Text("dal").foregroundStyle(.secondary)
                     TextField("1", text: $start).frame(width: 62)
                     Text("al").foregroundStyle(.secondary)
-                    TextField("ultimo", text: $end).frame(width: 62)
-                    Text("vuoto = dall'inizio / fino alla fine")
+                    // Letto il manga, il segnaposto diventa il numero
+                    // dell'ultimo capitolo invece di un generico "ultimo".
+                    TextField(capitoli.map(String.init) ?? "ultimo", text: $end)
+                        .frame(width: 62)
+                    Text(capitoli == nil
+                            ? "vuoto = dall'inizio / fino alla fine"
+                            : "su \(capitoli ?? 0) disponibili")
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 .textFieldStyle(.roundedBorder)
@@ -1202,13 +1275,6 @@ struct VibraPane: View {
                 .background(Circle().fill(accento(stato)))
             Text(title).font(.callout.weight(.medium))
             Text("· \(detail)").font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    func loadingRow(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text(text).foregroundStyle(.secondary).font(.callout)
         }
     }
 

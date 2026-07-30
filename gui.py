@@ -73,6 +73,7 @@ except Exception:  # noqa: BLE001
 # Se MangaWorld non è installato sul Mac, la scheda non compare.
 try:
     from mangaworld_downloads import (
+        conta_capitoli as mangaworld_conta,
         mangaworld_available,
         run_mangaworld_download,
     )
@@ -80,6 +81,9 @@ try:
 except Exception:  # noqa: BLE001
     def mangaworld_available() -> bool:
         return False
+
+    def mangaworld_conta(url: str) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
 
     class MangaCancelled(Exception):
         pass
@@ -1118,6 +1122,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_ytdlp_formats(data))
             elif path == "/mangaworld":
                 self._json(self._handle_mangaworld(data))
+            elif path == "/mangaworld_info":
+                self._json(self._handle_mangaworld_info(data))
             elif path == "/vibravid":
                 self._json(self._handle_vibravid(data))
             elif path == "/vibravid_search":
@@ -1373,6 +1379,18 @@ class Handler(BaseHTTPRequestHandler):
             return {"error": errore}
         STATE.log(f"▶️ Riproduzione in IINA: {etichetta or 'flusso remoto'}")
         return {"ok": True}
+
+    def _handle_mangaworld_info(self, data: dict) -> dict:
+        """Quanti capitoli ha il manga a questo indirizzo."""
+        if not mangaworld_available():
+            return {"error": "La funzione \"MangaWorld\" non è disponibile."}
+        url = str(data.get("url", "")).strip()
+        if not url.startswith(("http://", "https://")):
+            return {"error": "Indirizzo non valido."}
+        esito = mangaworld_conta(url)
+        if "error" not in esito and not esito.get("count"):
+            return {"error": "Nessun capitolo trovato a questo indirizzo."}
+        return esito
 
     def _handle_mangaworld(self, data: dict) -> dict:
         if not mangaworld_available():

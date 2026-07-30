@@ -14,6 +14,7 @@ cartella di destinazione.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -76,6 +77,41 @@ def mangaworld_available() -> bool:
         return DRIVER.exists() and (mangaworld_dir() / "manga_downloader.py").exists()
     except OSError:
         return False
+
+
+def conta_capitoli(url: str) -> dict:
+    """Nome e numero di capitoli del manga. ``{"name", "count"}`` o ``{"error"}``.
+
+    Una sola richiesta, meno di un secondo: serve a mostrare quanti capitoli
+    ci sono prima di far scegliere l'intervallo, che altrimenti si indovina.
+    """
+    if not mangaworld_available():
+        return {"error": "MangaWorld non è disponibile."}
+
+    base = mangaworld_dir()
+    argv = [_python(base), str(DRIVER), "--progetto", str(base),
+            "--url", url, "--conta"]
+    env = {k: v for k, v in os.environ.items()}
+    env["PYTHONUNBUFFERED"] = "1"
+
+    try:
+        proc = subprocess.run(  # noqa: S603
+            argv, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=60, env=env, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return {"error": "MangaWorld non ha risposto in tempo."}
+
+    for riga in (proc.stdout or "").splitlines():
+        riga = riga.strip()
+        if riga.startswith("{"):
+            try:
+                dati = json.loads(riga)
+            except ValueError:
+                continue
+            return {"name": dati.get("nome") or "", "count": int(dati.get("capitoli") or 0)}
+
+    return {"error": "Non sono riuscito a leggere i capitoli di questo indirizzo."}
 
 
 def _pulisci(riga: str) -> str:
