@@ -162,6 +162,30 @@ PORT = 8765
 IDLE_EXIT_SECONDS = 300  # esce se nessuna pagina è aperta e non ci sono download
 
 
+# Cronologia dei download completati: sopravvive alla chiusura dell'app.
+CRONOLOGIA = DATI_UTENTE / "cronologia.json"
+MAX_CRONOLOGIA = 200
+
+
+def _leggi_cronologia() -> list[dict]:
+    """Voci salvate dalle sessioni precedenti. Un file illeggibile non è un
+    motivo per non far partire l'app: si riparte da una lista vuota."""
+    try:
+        dati = json.loads(CRONOLOGIA.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [v for v in dati if isinstance(v, dict)][-MAX_CRONOLOGIA:]
+
+
+def _scrivi_cronologia(voci: list[dict]) -> None:
+    try:
+        DATI_UTENTE.mkdir(parents=True, exist_ok=True)
+        CRONOLOGIA.write_text(
+            json.dumps(voci, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass          # la cronologia è un di più: non deve mai bloccare nulla
+
+
 class DownloadCancelled(Exception):
     """Segnala che l'utente ha annullato il download."""
 
@@ -192,6 +216,21 @@ class AppState:
         self.error_seq = 0
         self.manual_progress = False  # True quando l'avanzamento lo gestisce yt-dlp
         self.last_poll = time.time()
+        self.completed = _leggi_cronologia()
+
+    def registra_completato(self, voce: dict) -> None:
+        """Aggiunge un download finito alla cronologia, e la salva su disco.
+
+        Prima l'elenco viveva solo in memoria: chiudendo l'app spariva tutto,
+        e non restava traccia di che cosa fosse già stato scaricato.
+        """
+        with self.lock:
+            voce = dict(voce)
+            voce.setdefault("when", time.time())
+            self.completed.append(voce)
+            del self.completed[:-MAX_CRONOLOGIA]
+            copia = self.completed[:]
+        _scrivi_cronologia(copia)
 
     def log(self, message: str) -> None:
         with self.lock:
@@ -571,12 +610,12 @@ def download_one_anime(
     progress = GuiProgress(state, cancel)
     run_downloads(video_urls, progress, download_path, cancel, state)
 
+    state.registra_completato({
+        "label": anime_name,
+        "path": str(download_path),
+        "size": folder_size(str(download_path)),
+    })
     with state.lock:
-        state.completed.append({
-            "label": anime_name,
-            "path": str(download_path),
-            "size": folder_size(str(download_path)),
-        })
         state.download_path = None
     state.log(f"✅ Download di \"{anime_name}\" completato.")
     # Nell'app nativa la notifica la pubblica Swift (con l'icona dell'app);
@@ -680,9 +719,9 @@ def download_other_site(
                     f.stat().st_size for f in new_files
                     if f.is_file() and f.exists()
                 )
-                state.completed.append({
-                    "label": title, "path": str(base), "size": size,
-                })
+            state.registra_completato({
+                "label": title, "path": str(base), "size": size,
+            })
             state.log(f"✅ Download di \"{title}\" completato.")
             if not os.environ.get("GUI_NO_BROWSER"):
                 notify(title)
@@ -732,9 +771,17 @@ def formato_selezione(params: dict) -> str:
     return esse + " · " + ", ".join(f"E{n:02d}" for n in numeri)
 
 
-def _descrizione_manga(inizio: int | None, fine: int | None, formato: str) -> str:
+def _descrizione_manga(
+    inizio: int | None,
+    fine: int | None,
+    sparsi: list[int],
+    formato: str,
+) -> str:
     """Riga di dettaglio mostrata nella coda: quali capitoli e in che formato."""
-    if inizio and fine:
+    if sparsi:
+        quali = ("capitolo " + str(sparsi[0])) if len(sparsi) == 1 else (
+            "capitoli " + ", ".join(str(n) for n in sparsi))
+    elif inizio and fine:
         quali = f"capitoli {inizio}-{fine}" if inizio != fine else f"capitolo {inizio}"
     elif inizio:
         quali = f"dal capitolo {inizio}"
@@ -760,11 +807,19 @@ def download_mangaworld(
     base = Path(scelta).expanduser() if scelta else Path.home() / "Downloads"
     base.mkdir(parents=True, exist_ok=True)
 
-    # Con un intervallo il numero di capitoli si sa già in partenza, e la barra
-    # può partire con il totale giusto invece di scoprirlo strada facendo.
-    # Chiedendoli tutti resta ignoto finché MangaWorld non annuncia i capitoli.
+    # Quali capitoli sono stati chiesti, in ordine: serve sia al totale della
+    # barra sia a scrivere il numero vero del capitolo in corso. MangaWorld
+    # annuncia solo la posizione nel lotto ("Chapter 2/5"), che con un
+    # intervallo che parte da 7 non dice nulla a chi guarda.
     inizio, fine = params.get("start"), params.get("end")
-    attesi = fine - inizio + 1 if inizio and fine else 0
+    sparsi = list(params.get("chapters") or [])
+    if sparsi:
+        numeri = sparsi
+    elif inizio and fine:
+        numeri = list(range(inizio, fine + 1))
+    else:
+        numeri = []          # "tutti", o intervallo aperto: si scopre strada facendo
+    attesi = len(numeri)
 
     with state.lock:
         state.manual_progress = True
@@ -805,9 +860,15 @@ def download_mangaworld(
             state.overall["total"] = totale
             state.overall["done"] = max(indice - 1, 0)
             state.overall["stage"] = ""
+            # Il numero vero del capitolo, quando lo si conosce: "Capitolo 7"
+            # invece di "Capitolo 1 di 3" scaricando dal settimo in poi.
+            reale = numeri[indice - 1] if 0 < indice <= len(numeri) else None
+            desc = (f"Capitolo {reale}" if reale is not None
+                    else f"Capitolo {indice} di {totale}")
+            if reale is not None and totale > 1:
+                desc += f" ({indice} di {totale})"
             state.tasks = {
-                0: {"desc": f"Capitolo {indice} di {totale}",
-                    "pct": min(pct, 100.0), "visible": True},
+                0: {"desc": desc, "pct": min(pct, 100.0), "visible": True},
             }
 
     try:
@@ -815,6 +876,7 @@ def download_mangaworld(
             url,
             params.get("start"),
             params.get("end"),
+            sparsi,
             str(params.get("format") or ""),
             str(base),
             cancel,
@@ -825,6 +887,13 @@ def download_mangaworld(
 
     with state.lock:
         state.overall["done"] = state.overall.get("total") or 0
+    cartella = base / titolo
+    state.registra_completato({
+        "label": titolo,
+        "path": str(cartella if cartella.is_dir() else base),
+        "size": folder_size(str(cartella)) if cartella.is_dir() else 0,
+    })
+    state.log(f"✅ Download di \"{titolo}\" completato.")
     return titolo
 
 
@@ -989,8 +1058,7 @@ def download_vibravid(
     # elenco ci sono più voci della stessa serie.
     etichetta = f"{title} · {formato_selezione(params)}".rstrip(" ·")
 
-    with state.lock:
-        state.completed.append({"label": etichetta, "path": dest, "size": size})
+    state.registra_completato({"label": etichetta, "path": dest, "size": size})
     state.log(f"✅ Download di \"{etichetta}\" completato.")
     if not os.environ.get("GUI_NO_BROWSER"):
         notify(title)
@@ -1152,6 +1220,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/clear_completed":
                 with STATE.lock:
                     STATE.completed = []
+                # Svuotare l'elenco a schermo deve svuotare anche il file,
+                # altrimenti la cronologia riapparirebbe al riavvio.
+                _scrivi_cronologia([])
                 self._json({"ok": True})
             elif path == "/save_urls":
                 content = str(data.get("content", "")).strip()
@@ -1407,18 +1478,29 @@ class Handler(BaseHTTPRequestHandler):
         if inizio and fine and inizio > fine:
             return {"error": "Il capitolo iniziale viene dopo quello finale."}
 
+        # Capitoli sparsi: hanno la precedenza su qualsiasi intervallo.
+        sparsi = [
+            int(p.strip())
+            for p in str(data.get("chapters", "")).split(",")
+            if p.strip().isdigit() and int(p.strip()) > 0
+        ]
+        if sparsi:
+            inizio = fine = None
+
         params = {
             "url": url,
             "title": str(data.get("title", "")).strip(),
             "start": inizio,
             "end": fine,
+            "chapters": sorted(set(sparsi)),
             "format": str(data.get("format", "")).strip(),
             "path": str(data.get("path", "")).strip(),
         }
         error = start_job(
             lambda cancel: download_mangaworld(params, STATE, cancel),
             label=params["title"] or "Manga",
-            detail=_descrizione_manga(inizio, fine, params["format"]),
+            detail=_descrizione_manga(inizio, fine, params["chapters"],
+                                      params["format"]),
         )
         return {"error": error} if error else {"ok": True}
 

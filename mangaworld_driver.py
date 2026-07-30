@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 
@@ -38,6 +39,73 @@ def _prepara_percorso(progetto: Path) -> None:
     mio = Path(__file__).resolve().parent
     sys.path = [p for p in sys.path if p and Path(p).resolve() != mio]
     sys.path.insert(0, str(progetto))
+
+
+def _numeri(elenco: str) -> list[int]:
+    """Numeri di capitolo da una stringa tipo "3, 7, 12", in ordine e senza doppioni."""
+    visti: list[int] = []
+    for pezzo in elenco.split(","):
+        pezzo = pezzo.strip()
+        if pezzo.isdigit() and int(pezzo) not in visti:
+            visti.append(int(pezzo))
+    return sorted(visti)
+
+
+def _rinomina_capitoli(cartella_manga: Path, numeri: list[int]) -> None:
+    """Dà alle cartelle il numero di capitolo vero invece della posizione.
+
+    Loro creano le cartelle come ``Chapter {indice + 1}``, dove l'indice è la
+    posizione dentro il lotto scaricato: chiedendo i capitoli 5 e 6 si
+    ottengono "Chapter 1" e "Chapter 2". Oltre a essere fuorviante è
+    pericoloso, perché un download successivo dei capitoli 1 e 2 finirebbe
+    sopra questi.
+
+    Si rinomina in due passaggi con un nome di servizio: andando diretti, un
+    "Chapter 1" che diventa "Chapter 5" potrebbe travolgere un "Chapter 5" già
+    presente da un download precedente.
+    """
+    coppie = [
+        (cartella_manga / f"Chapter {posizione}", numero)
+        for posizione, numero in enumerate(numeri, start=1)
+        if posizione != numero
+    ]
+    provvisori = []
+    for vecchia, numero in coppie:
+        if not vecchia.is_dir():
+            continue
+        ponte = cartella_manga / f".vault-{numero}"
+        vecchia.rename(ponte)
+        provvisori.append((ponte, cartella_manga / f"Chapter {numero}"))
+
+    for ponte, nuova in provvisori:
+        if nuova.exists():
+            shutil.rmtree(nuova, ignore_errors=True)
+        ponte.rename(nuova)
+
+
+def _genera_comic(cartella_manga: Path, formato: str) -> None:
+    """Genera un PDF o CBZ per ciascun capitolo, e nient'altro.
+
+    Non si usa il loro ``generate_comic_files`` perché produce un file di
+    troppo. Al suo interno scorre le cartelle così::
+
+        for path, _, _ in os.walk(parent_folder):
+            manga_name = Path(path).parent.name
+            if manga_name != DOWNLOAD_FOLDER:
+                generate_file_from_folder(path, ...)
+
+    Il confronto mette a fianco il *nome* della cartella superiore e
+    ``DOWNLOAD_FOLDER``: torna solo se quest'ultimo è il nome nudo "Downloads",
+    come nel loro uso originale. Qui è un percorso assoluto — serve a decidere
+    dove salvare — quindi il confronto non è mai vero e la prima cartella
+    visitata, quella del manga, diventa un PDF con dentro l'intera opera,
+    accanto a quelli dei singoli capitoli. Scaricando un capitolo con PDF ci si
+    ritrovava con due file identici.
+    """
+    from src.comic_generator import generate_file_from_folder
+
+    for capitolo in sorted(p for p in cartella_manga.iterdir() if p.is_dir()):
+        generate_file_from_folder(str(capitolo), output_format=formato)
 
 
 def _conta(url: str, extract_manga_info, fetch_page) -> int:  # noqa: ANN001
@@ -69,6 +137,8 @@ def main() -> int:
     ap.add_argument("--url", required=True)
     ap.add_argument("--start", type=int, default=None)
     ap.add_argument("--end", type=int, default=None)
+    ap.add_argument("--capitoli", default="",
+                    help="capitoli sparsi, separati da virgola (es. 3,7,12)")
     ap.add_argument("--formato", default=None, choices=["pdf", "cbz"])
     ap.add_argument("--destinazione", default="")
     ap.add_argument("--conta", action="store_true",
@@ -113,14 +183,38 @@ def main() -> int:
             sys.stderr.write("Nessun capitolo trovato a questo indirizzo.\n")
             return
 
-        inizio, fine = validate_index_range(args.start, args.end, len(capitoli))
-        link = await extract_download_links(capitoli, inizio, fine, tipo)
+        if args.capitoli:
+            # Capitoli sparsi: si prendono i link di tutti — extract_download_links
+            # li richiede comunque tutti prima di affettare, quindi non costa
+            # nulla in più — e si tengono solo quelli chiesti.
+            voluti = [
+                n - 1 for n in _numeri(args.capitoli)
+                if 1 <= n <= len(capitoli)
+            ]
+            if not voluti:
+                sys.stderr.write("Nessuno dei capitoli indicati esiste.\n")
+                return
+            tutti = await extract_download_links(capitoli, 0, len(capitoli), tipo)
+            link = [tutti[i] for i in voluti if i < len(tutti)]
+            pag = [pagine[i] for i in voluti if i < len(pagine)]
+        else:
+            inizio, fine = validate_index_range(args.start, args.end, len(capitoli))
+            link = await extract_download_links(capitoli, inizio, fine, tipo)
+            # Qui la correzione: le pagine si affettano con gli stessi indici
+            # con cui sono stati raccolti i link, non con quelli grezzi.
+            pag = pagine[inizio:fine]
+            voluti = list(range(inizio, fine))
 
-        # Qui la correzione: le pagine si affettano con gli stessi indici con
-        # cui sono stati raccolti i link, non con quelli grezzi.
-        download_chapter_with_progress(
-            nome, link, pagine[inizio:fine], output_format=args.formato,
-        )
+        # Le immagini si scaricano sempre senza chiedere la generazione dei
+        # comic: ci pensa _genera_comic subito dopo. Vedi lì il perché.
+        download_chapter_with_progress(nome, link, pag, output_format=None)
+
+        cartella = Path(cfg.DOWNLOAD_FOLDER) / nome
+        # Prima si rimettono i numeri veri, poi si generano i comic: così i
+        # PDF nascono già col nome del capitolo giusto.
+        _rinomina_capitoli(cartella, [i + 1 for i in voluti[:len(link)]])
+        if args.formato:
+            _genera_comic(cartella, args.formato)
 
     asyncio.run(esegui())
     return 0

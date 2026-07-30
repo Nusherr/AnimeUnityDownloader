@@ -122,6 +122,7 @@ def run_mangaworld_download(
     url: str,
     start: int | None,
     end: int | None,
+    capitoli: list[int],
     formato: str,
     destinazione: str,
     cancel: threading.Event,
@@ -137,10 +138,14 @@ def run_mangaworld_download(
         "--url", url,
         "--destinazione", destinazione,
     ]
-    if start is not None:
-        argv += ["--start", str(start)]
-    if end is not None:
-        argv += ["--end", str(end)]
+    if capitoli:
+        # Capitoli sparsi: escludono l'intervallo, non si sommano.
+        argv += ["--capitoli", ",".join(str(n) for n in capitoli)]
+    else:
+        if start is not None:
+            argv += ["--start", str(start)]
+        if end is not None:
+            argv += ["--end", str(end)]
     if formato in ("pdf", "cbz"):
         argv += ["--formato", formato]
 

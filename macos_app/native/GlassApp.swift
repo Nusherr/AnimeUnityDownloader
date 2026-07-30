@@ -718,9 +718,10 @@ struct MangaPane: View {
     @Environment(\.controlActiveState) private var stato
     @ObservedObject var model: AppModel
     @State private var url = ""
-    @State private var mode = "all"          // all | range
+    @State private var mode = "all"          // all | range | list
     @State private var start = ""
     @State private var end = ""
+    @State private var elenco = ""           // capitoli sparsi: "3, 7, 12"
     @State private var formato = ""          // "" | pdf | cbz
 
     // Quanti capitoli ha il manga incollato. Si legge da solo poco dopo che si
@@ -731,12 +732,25 @@ struct MangaPane: View {
     @State private var erroreLettura: String? = nil
     @State private var lettura: Task<Void, Never>? = nil
 
+    /// I numeri scritti in "Specifici", ripuliti da spazi e da ciò che non è cifra.
+    var scelti: [String] {
+        elenco.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && Int($0) != nil }
+    }
+
     var pronto: Bool {
         guard url.hasPrefix("http") else { return false }
-        if mode != "range" { return true }
-        // Con l'intervallo serve almeno un estremo, altrimenti equivale a "tutti".
-        return !start.trimmingCharacters(in: .whitespaces).isEmpty
-            || !end.trimmingCharacters(in: .whitespaces).isEmpty
+        switch mode {
+        case "range":
+            // Con l'intervallo serve almeno un estremo, o equivale a "tutti".
+            return !start.trimmingCharacters(in: .whitespaces).isEmpty
+                || !end.trimmingCharacters(in: .whitespaces).isEmpty
+        case "list":
+            return !scelti.isEmpty
+        default:
+            return true
+        }
     }
 
     /// Nome del manga: quello letto dal sito se è arrivato, altrimenti ricavato
@@ -808,6 +822,7 @@ struct MangaPane: View {
                 GlassSegmented(selection: $mode, options: [
                     SegOption(id: "all", label: "Tutti"),
                     SegOption(id: "range", label: "Intervallo"),
+                    SegOption(id: "list", label: "Specifici"),
                 ])
                 Spacer()
                 DownloadButton(inCoda: model.state.running, attivo: pronto) { avvia() }
@@ -828,6 +843,17 @@ struct MangaPane: View {
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 .textFieldStyle(.roundedBorder)
+            } else if mode == "list" {
+                HStack(spacing: 10) {
+                    TextField("3, 7, 12", text: $elenco).frame(width: 180)
+                        .textFieldStyle(.roundedBorder)
+                    Text(scelti.isEmpty
+                            ? "numeri separati da virgola"
+                            : (scelti.count == 1
+                                ? "1 capitolo scelto"
+                                : "\(scelti.count) capitoli scelti"))
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
             }
 
             HStack(spacing: 12) {
@@ -853,6 +879,7 @@ struct MangaPane: View {
                 "title": titolo,
                 "start": mode == "range" ? start.trimmingCharacters(in: .whitespaces) : "",
                 "end": mode == "range" ? end.trimmingCharacters(in: .whitespaces) : "",
+                "chapters": mode == "list" ? scelti.joined(separator: ",") : "",
                 "format": formato,
                 "path": model.destination,
             ])

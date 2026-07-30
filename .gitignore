@@ -182,3 +182,6 @@ macos_app/native/*.app
 
 # Pacchetto distribuibile: si rigenera con make_dist.sh
 macos_app/native/dist/
+
+# Cronologia dei download: dati dell'utente, non codice.
+cronologia.json
