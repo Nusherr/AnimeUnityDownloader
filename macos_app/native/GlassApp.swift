@@ -725,6 +725,32 @@ func loadingRow(_ text: String) -> some View {
     }
 }
 
+/// Intestazione di un passo numerato: il pallino con il numero, il titolo e
+/// un dettaglio. La usano VibraVid e MangaWorld, che hanno lo stesso flusso a
+/// passi, e conviene che siano identiche.
+func stepLabel(_ n: String, _ title: String, detail: String,
+               stato: ControlActiveState) -> some View {
+    HStack(spacing: 7) {
+        Text(n)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: 16, height: 16)
+            .background(Circle().fill(accento(stato)))
+        Text(title).font(.callout.weight(.medium))
+        Text("· \(detail)").font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// Un manga trovato dalla ricerca su MangaWorld.
+struct MangaResult: Identifiable {
+    let name: String
+    let url: String
+    /// "Manga · In corso · MIURA Kentaro": serve a distinguere fra titoli
+    /// quasi omonimi, che su MangaWorld sono la norma.
+    let info: String
+    var id: String { url }
+}
+
 // --------------------------------------------------------------- MangaWorld
 /// Scheda MangaWorld: si incolla il link del manga e si scelgono i capitoli.
 ///
@@ -741,6 +767,13 @@ struct MangaPane: View {
     @State private var end = ""
     @State private var elenco = ""           // capitoli sparsi: "3, 7, 12"
     @State private var formato = ""          // "" | pdf | cbz
+
+    // Risultati della ricerca. Lo stesso campo serve a cercare e a incollare un
+    // link: sono due modi di indicare lo stesso manga, e tenerli separati
+    // avrebbe voluto dire due caselle che fanno la stessa cosa.
+    @State private var risultati: [MangaResult] = []
+    @State private var cercando = false
+    @State private var erroreRicerca: String? = nil
 
     // Quanti capitoli ha il manga incollato. Si legge da solo poco dopo che si
     // smette di scrivere: senza, l'intervallo si compila a indovinare.
@@ -781,11 +814,63 @@ struct MangaPane: View {
         return ultimo.replacingOccurrences(of: "-", with: " ").capitalized
     }
 
+    /// True se quel che c'è nel campo è un indirizzo e non un titolo da cercare.
+    var eLink: Bool {
+        url.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("http")
+    }
+
+    /// Cerca, o legge i capitoli: dipende da cosa c'è nel campo.
+    ///
+    /// Un link parte da solo dopo una pausa nella digitazione — è già
+    /// l'indirizzo definitivo, non c'è niente da confermare. Un titolo invece
+    /// aspetta Invio o il pulsante: cercare a ogni tasto vorrebbe dire una
+    /// richiesta per lettera.
+    func invia() {
+        if eLink { programmaLettura() } else { cerca() }
+    }
+
+    func cerca() {
+        let testo = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard testo.count >= 2 else { return }
+        lettura?.cancel()
+        capitoli = nil; nomeLetto = ""; erroreLettura = nil
+        erroreRicerca = nil; risultati = []
+        cercando = true
+        Task {
+            let obj = await model.post("/mangaworld_search", ["query": testo])
+            cercando = false
+            if let err = obj["error"] as? String {
+                erroreRicerca = err
+                return
+            }
+            var out: [MangaResult] = []
+            if let arr = obj["results"] as? [[String: Any]] {
+                for d in arr {
+                    out.append(MangaResult(
+                        name: d["name"] as? String ?? "",
+                        url: d["url"] as? String ?? "",
+                        info: d["info"] as? String ?? ""))
+                }
+            }
+            risultati = out
+        }
+    }
+
+    /// Un risultato scelto diventa l'indirizzo, e da lì il flusso è identico a
+    /// quello di un link incollato a mano.
+    func scegli(_ r: MangaResult) {
+        risultati = []
+        erroreRicerca = nil
+        url = r.url
+        nomeLetto = r.name
+        programmaLettura()
+    }
+
     /// Rilegge il conteggio dopo una pausa nella digitazione, così incollando
     /// un indirizzo non si manda una richiesta per ogni carattere.
     func programmaLettura() {
         lettura?.cancel()
-        capitoli = nil; nomeLetto = ""; erroreLettura = nil
+        capitoli = nil; erroreLettura = nil
         let indirizzo = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard indirizzo.hasPrefix("http") else { leggendo = false; return }
 
@@ -807,9 +892,51 @@ struct MangaPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            TextField("Incolla il link del manga da MangaWorld…", text: $url)
-                .textFieldStyle(.roundedBorder).controlSize(.large)
-                .onChange(of: url) { _, _ in programmaLettura() }
+            HStack(spacing: 10) {
+                TextField("Cerca un manga, o incolla un link…", text: $url)
+                    .textFieldStyle(.roundedBorder).controlSize(.large)
+                    .onSubmit { invia() }
+                    .onChange(of: url) { _, _ in
+                        // Solo un link si legge da sé; un titolo aspetta Invio.
+                        risultati = []; erroreRicerca = nil
+                        if eLink { programmaLettura() } else { capitoli = nil }
+                    }
+                IconButton(symbol: eLink ? "arrow.right" : "magnifyingglass",
+                           hint: eLink ? "Leggi i capitoli" : "Cerca") { invia() }
+                    .disabled(url.count < 2 || cercando)
+                    .opacity(url.count < 2 || cercando ? 0.4 : 1)
+            }
+
+            if cercando {
+                loadingRow("Cerco su MangaWorld…")
+            } else if let err = erroreRicerca {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    Text(err).font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                }
+            } else if !risultati.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    stepLabel("1", "Scegli il titolo",
+                              detail: "\(risultati.count) risultati", stato: stato)
+                    VStack(spacing: 0) {
+                        ForEach(risultati) { r in
+                            HStack(spacing: 8) {
+                                Text(r.name).lineLimit(1)
+                                Text(r.info).font(.caption)
+                                    .foregroundStyle(.secondary).lineLimit(1)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 9)
+                            .contentShape(.rect)
+                            .onTapGesture { scegli(r) }
+                            Divider()
+                        }
+                    }
+                    .background(.background.secondary, in: .rect(cornerRadius: 9))
+                }
+            }
 
             // Esito della lettura: quanti capitoli ci sono, o perché non si sa.
             if leggendo {
@@ -1088,7 +1215,7 @@ struct VibraPane: View {
             } else if !model.searchResults.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     stepLabel("1", "Scegli il titolo",
-                              detail: "\(model.searchResults.count) risultati")
+                              detail: "\(model.searchResults.count) risultati", stato: stato)
                     ScrollView {
                         VStack(spacing: 0) {
                             ForEach(model.searchResults) { r in
@@ -1137,7 +1264,7 @@ struct VibraPane: View {
                     // con 1171 episodi una griglia sarebbe comunque inservibile.
                     VStack(alignment: .leading, spacing: 7) {
                         stepLabel("2", "Scegli gli episodi",
-                                  detail: "\(flatCount ?? 0) episodi, questo sito non ha stagioni")
+                                  detail: "\(flatCount ?? 0) episodi, questo sito non ha stagioni", stato: stato)
                         GlassSegmented(selection: $flatMode, options: [
                             SegOption(id: "all", label: "Tutti"),
                             SegOption(id: "range", label: "Intervallo"),
@@ -1165,7 +1292,7 @@ struct VibraPane: View {
                 } else if !seasons.isEmpty {
                     VStack(alignment: .leading, spacing: 7) {
                         stepLabel("2", "Scegli la stagione",
-                                  detail: "\(seasons.count) stagioni disponibili")
+                                  detail: "\(seasons.count) stagioni disponibili", stato: stato)
                         FlowChips {
                             Chip(label: "Tutte le stagioni", on: allSeasons) {
                                 allSeasons = true
@@ -1191,7 +1318,7 @@ struct VibraPane: View {
                 } else if !episodes.isEmpty {
                     VStack(alignment: .leading, spacing: 7) {
                         stepLabel("3", "Scegli gli episodi",
-                                  detail: "\(episodes.count) episodi")
+                                  detail: "\(episodes.count) episodi", stato: stato)
                         FlowChips {
                             Chip(label: "Tutti gli episodi", on: allEpisodes) {
                                 allEpisodes = true
@@ -1220,7 +1347,7 @@ struct VibraPane: View {
             // ---- 4. Lingua e sottotitoli, una volta scelto cosa scaricare
             if chosen != nil && (isMovie || isFlat || allSeasons || selectedSeason != nil) {
                 VStack(alignment: .leading, spacing: 7) {
-                    stepLabel(passoLingua, "Lingua e sottotitoli", detail: "italiano o inglese")
+                    stepLabel(passoLingua, "Lingua e sottotitoli", detail: "italiano o inglese", stato: stato)
                     HStack(spacing: 14) {
                         HStack(spacing: 6) {
                             Text("Audio").font(.caption).foregroundStyle(.secondary)
@@ -1309,18 +1436,6 @@ struct VibraPane: View {
         }
         guard selectedSeason != nil else { return chosenTitle }
         return "\(chosenTitle) · \(selezione)" + lingue
-    }
-
-    func stepLabel(_ n: String, _ title: String, detail: String) -> some View {
-        HStack(spacing: 7) {
-            Text(n)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 16, height: 16)
-                .background(Circle().fill(accento(stato)))
-            Text(title).font(.callout.weight(.medium))
-            Text("· \(detail)").font(.caption).foregroundStyle(.secondary)
-        }
     }
 
     // ------------------------------------------------------------ azioni

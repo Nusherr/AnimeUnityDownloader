@@ -73,6 +73,7 @@ except Exception:  # noqa: BLE001
 # Se MangaWorld non è installato sul Mac, la scheda non compare.
 try:
     from mangaworld_downloads import (
+        cerca_manga as mangaworld_cerca,
         conta_capitoli as mangaworld_conta,
         mangaworld_available,
         run_mangaworld_download,
@@ -83,6 +84,9 @@ except Exception:  # noqa: BLE001
         return False
 
     def mangaworld_conta(url: str) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def mangaworld_cerca(query: str) -> dict:  # noqa: ARG001
         return {"error": "Funzione non disponibile."}
 
     class MangaCancelled(Exception):
@@ -1267,6 +1271,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_mangaworld(data))
             elif path == "/mangaworld_info":
                 self._json(self._handle_mangaworld_info(data))
+            elif path == "/mangaworld_search":
+                self._json(self._handle_mangaworld_search(data))
             elif path == "/vibravid":
                 self._json(self._handle_vibravid(data))
             elif path == "/vibravid_search":
@@ -1525,6 +1531,18 @@ class Handler(BaseHTTPRequestHandler):
             return {"error": errore}
         STATE.log(f"▶️ Riproduzione in IINA: {etichetta or 'flusso remoto'}")
         return {"ok": True}
+
+    def _handle_mangaworld_search(self, data: dict) -> dict:
+        """Cerca un titolo su MangaWorld."""
+        if not mangaworld_available():
+            return {"error": "La funzione \"MangaWorld\" non è disponibile."}
+        query = str(data.get("query", "")).strip()
+        if len(query) < 2:
+            return {"error": "Scrivi almeno due lettere."}
+        esito = mangaworld_cerca(query)
+        if "error" not in esito and not esito.get("results"):
+            return {"error": f"Nessun manga trovato per \"{query}\"."}
+        return esito
 
     def _handle_mangaworld_info(self, data: dict) -> dict:
         """Quanti capitoli ha il manga a questo indirizzo."""

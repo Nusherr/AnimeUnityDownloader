@@ -79,6 +79,63 @@ def mangaworld_available() -> bool:
         return False
 
 
+# Da dove parte la ricerca. Il dominio di MangaWorld cambia spesso e risponde
+# con un redirect verso quello attivo: si segue, e i link dei risultati arrivano
+# già sul dominio giusto senza doverlo indovinare.
+_RICERCA_URL = "https://www.mangaworld.ac/archive"
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+
+def cerca_manga(query: str) -> dict:
+    """Cerca un titolo su MangaWorld. ``{"results": [...]}`` o ``{"error": …}``.
+
+    Lo scraping è nostro: MangaWorld non ha un'API e il downloader non offre
+    la ricerca. I risultati stanno in ``.comics-grid .entry``, ognuno con il
+    titolo in ``a.manga-title`` e tipo, stato e autore nei ``.genre``.
+    Se un giorno cambiano il markup, questa funzione smette di trovare nulla:
+    è il prezzo di avere la ricerca su un sito che non la espone.
+    """
+    query = query.strip()
+    if not query:
+        return {"results": []}
+
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return {"error": "Manca una libreria per la ricerca."}
+
+    try:
+        risposta = requests.get(
+            _RICERCA_URL, params={"keyword": query},
+            headers={"User-Agent": _UA}, timeout=30, allow_redirects=True,
+        )
+        risposta.raise_for_status()
+    except Exception:  # noqa: BLE001
+        return {"error": "Non sono riuscito a raggiungere MangaWorld."}
+
+    zuppa = BeautifulSoup(risposta.text, "html.parser")
+    risultati = []
+    for voce in zuppa.select(".comics-grid .entry"):
+        collegamento = voce.select_one("a.manga-title") or voce.select_one("a")
+        if not collegamento or not collegamento.get("href"):
+            continue
+        # "Tipo: Manga", "Stato: In corso", "Autore: MIURA Kentaro": si tiene
+        # solo la parte dopo i due punti, che è quella che dice qualcosa.
+        etichette = [
+            e.get_text(" ", strip=True).split(":", 1)[-1].strip()
+            for e in voce.select(".genre, .status, .author")
+        ]
+        risultati.append({
+            "name": collegamento.get_text(strip=True),
+            "url": collegamento["href"],
+            "info": " · ".join(x for x in etichette if x)[:80],
+        })
+
+    return {"results": risultati[:20]}
+
+
 def conta_capitoli(url: str) -> dict:
     """Nome e numero di capitoli del manga. ``{"name", "count"}`` o ``{"error"}``.
 
