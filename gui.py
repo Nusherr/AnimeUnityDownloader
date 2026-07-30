@@ -124,6 +124,17 @@ except Exception:  # noqa: BLE001
         pass
 
 PROJECT_DIR = Path(__file__).resolve().parent
+
+# Dove si scrive ciò che l'utente produce: la lista di URL del download in
+# elenco, la configurazione privata di VibraVid, la coda.
+#
+# Non accanto al codice, che nel pacchetto distribuibile sta dentro Vault.app:
+# scriverci fallisce ogni volta che il bundle è in sola lettura — succede a chi
+# apre l'app direttamente dal DMG invece di trascinarla in Applicazioni, e a
+# chiunque non sia amministratore. In sviluppo il percorso coincide con quello
+# di prima, quindi non cambia nulla.
+DATI_UTENTE = Path.home() / "Library" / "Application Support" / "Vault"
+
 # I video finiscono di default in ~/Downloads (il tool aggiunge "Downloads/<anime>")
 DEFAULT_BASE = str(Path.home())
 HOST = "127.0.0.1"
@@ -933,7 +944,7 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.last_poll = time.time()
             self._json(STATE.snapshot())
         elif path == "/urls":
-            urls_path = PROJECT_DIR / URLS_FILE
+            urls_path = DATI_UTENTE / URLS_FILE
             content = urls_path.read_text(encoding="utf-8") if urls_path.exists() else ""
             self._json({"content": content})
         elif path == "/vibravid_sites":
@@ -990,7 +1001,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             elif path == "/save_urls":
                 content = str(data.get("content", "")).strip()
-                (PROJECT_DIR / URLS_FILE).write_text(
+                DATI_UTENTE.mkdir(parents=True, exist_ok=True)
+                (DATI_UTENTE / URLS_FILE).write_text(
                     content + ("\n" if content else ""), encoding="utf-8")
                 self._json({"ok": True})
             elif path == "/pick_folder":

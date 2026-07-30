@@ -200,7 +200,15 @@ def output_root(custom_path: str | None = None) -> Path:
 # raggruppamento (Serie/Film/Anime) svuotati, così i download finiscono
 # direttamente nella cartella scelta. L'originale di VibraVid resta intatto:
 # usandolo da solo continua a organizzare i file come prima.
-CONF_PRIVATA = Path(__file__).resolve().parent / "vibravid_conf"
+#
+# Vive nella cartella dati dell'utente, non accanto al codice: nel pacchetto
+# distribuibile il codice sta dentro Vault.app, e scriverci fallisce ogni volta
+# che il bundle è in sola lettura. Succede a chi apre l'app direttamente dal
+# DMG invece di trascinarla in Applicazioni, e a chiunque non sia
+# amministratore: la scheda VibraVid non partiva, senza spiegare perché. In
+# sviluppo il percorso coincide con quello di prima, quindi nulla si sposta.
+CONF_PRIVATA = (Path.home() / "Library" / "Application Support" / "Vault"
+                / "vibravid_conf")
 
 _LIVELLI_DA_TOGLIERE = (
     "serie_folder_name", "movie_folder_name", "anime_folder_name",
