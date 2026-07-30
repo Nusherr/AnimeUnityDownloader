@@ -711,6 +711,29 @@ def formato_selezione(params: dict) -> str:
     return esse + " · " + ", ".join(f"E{n:02d}" for n in numeri)
 
 
+def _conta_selezione(scelta: str) -> int:
+    """Quanti episodi vale una selezione nella sintassi di VibraVid.
+
+    Accetta le virgole ("1,4,9") e gli intervalli ("3-7"). Un intervallo aperto
+    ("3-*") non è contabile: si conta come uno solo, tanto è una stima di
+    riserva — il numero buono lo manda l'interfaccia.
+    """
+    totale = 0
+    for pezzo in scelta.split(","):
+        pezzo = pezzo.strip()
+        if not pezzo:
+            continue
+        if "-" in pezzo:
+            inizio, _, fine = pezzo.partition("-")
+            if inizio.strip().isdigit() and fine.strip().isdigit():
+                totale += max(0, int(fine) - int(inizio) + 1)
+            else:
+                totale += 1
+        else:
+            totale += 1
+    return totale
+
+
 def download_vibravid(
     params: dict,
     state: AppState,
@@ -742,11 +765,21 @@ def download_vibravid(
     state.log(f"VibraVid · sito: {params.get('site')} · ricerca: {params.get('query')}")
 
     # Quanti episodi sono stati chiesti: serve per sapere a quanto ammonta il
-    # lavoro totale. Con "*" non si sa in anticipo e il totale cresce mano a
-    # mano che VibraVid annuncia gli episodi.
+    # lavoro totale.
+    #
+    # Il numero lo manda l'interfaccia, che lo conosce già: ha in mano l'elenco
+    # degli episodi della stagione, o il conteggio dei siti senza stagioni.
+    # Senza, con "*" il totale veniva scoperto un episodio alla volta e la
+    # barra si suddivideva sotto gli occhi — intera, poi 1/2, poi 1/3.
+    #
+    # Resta ignoto solo scaricando tutte le stagioni insieme: lì gli episodi
+    # delle stagioni successive non sono ancora stati letti da nessuno.
+    dichiarati = str(params.get("count", "")).strip()
     richiesti = str(params.get("episode", "")).strip()
-    if richiesti and richiesti != "*":
-        attesi = len([n for n in richiesti.split(",") if n.strip()])
+    if dichiarati.isdigit() and int(dichiarati) > 0:
+        attesi = int(dichiarati)
+    elif richiesti and richiesti != "*":
+        attesi = _conta_selezione(richiesti)
     else:
         attesi = 0
 
@@ -1148,6 +1181,10 @@ class Handler(BaseHTTPRequestHandler):
             "audio": str(data.get("audio", "")).strip(),
             "subtitle": str(data.get("subtitle", "")).strip(),
             "path": str(data.get("path", "")).strip(),
+            # Quanti episodi ha chiesto l'interfaccia. Lei il numero lo conosce
+            # già, e senza questo la barra scopriva il totale un episodio alla
+            # volta, suddividendosi sotto gli occhi.
+            "count": str(data.get("count", "")).strip(),
         }
         error = start_job(
             lambda cancel: download_vibravid(params, STATE, cancel),

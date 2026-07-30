@@ -236,6 +236,10 @@ struct IconButton: View {
                 .font(.system(size: size * 0.45, weight: .semibold))
                 .frame(width: size, height: size)
                 .contentShape(.circle)
+                // Il simbolo può cambiare mentre il pulsante resta lo stesso
+                // (freccia → spunta alla conferma): così si trasforma invece
+                // di sparire e riapparire.
+                .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(.plain)
         .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
@@ -248,6 +252,37 @@ struct IconButton: View {
                      in: .circle)
         .help(hint)
         .accessibilityLabel(hint)
+    }
+}
+
+/// Pulsante di avvio del download, che conferma di essere stato premuto.
+///
+/// Il lavoro parte in un sottoprocesso e la barra compare solo quando questo
+/// risponde: nel frattempo a schermo non cambiava nulla e non si capiva se il
+/// clic fosse andato a segno, tanto che veniva naturale premere una seconda
+/// volta. Qui la freccia diventa una spunta per un istante, e nel frattempo il
+/// pulsante si disabilita così il doppio invio non è nemmeno possibile.
+struct DownloadButton: View {
+    var inCoda: Bool                     // c'è già un download in corso
+    var attivo: Bool
+    let action: () -> Void
+    @State private var confermato = false
+
+    var body: some View {
+        IconButton(symbol: confermato ? "checkmark" : "arrow.down.to.line",
+                   hint: confermato
+                       ? (inCoda ? "Aggiunto alla coda" : "Download avviato")
+                       : (inCoda ? "Aggiungi alla coda" : "Scarica"),
+                   prominent: true) {
+            action()
+            withAnimation(.snappy) { confermato = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.4))
+                withAnimation(.snappy) { confermato = false }
+            }
+        }
+        .disabled(!attivo || confermato)
+        .opacity(attivo ? 1 : 0.4)
     }
 }
 
@@ -384,6 +419,10 @@ struct ContentView: View {
     @StateObject private var model = AppModel.shared
     @State private var tab: Tab = .vibra
     @State private var showLog = false
+    @State private var schermoIntero = false
+
+    /// Permesso che impedisce al Mac di addormentarsi mentre si scarica.
+    @State private var veglia: NSObjectProtocol? = nil
 
     // Le schede opzionali compaiono solo se il motore corrispondente c'è.
     var visibleTabs: [Tab] {
@@ -435,7 +474,27 @@ struct ContentView: View {
         // Sfondo traslucido della finestra, via API nativa di SwiftUI: è il
         // sistema a gestirne la composizione, quindi non serve alcun intervento
         // manuale su opacità, ridisegni o cambi di scrivania.
-        .containerBackground(.ultraThinMaterial, for: .window)
+        //
+        // Tranne che a schermo intero. Lì dietro la finestra non c'è più la
+        // scrivania ma il fondo nero dello spazio dedicato, e un materiale
+        // sottile non fa che filtrarlo: l'interfaccia si incupiva tutta, anche
+        // in tema chiaro. A schermo intero non c'è nulla da lasciar trasparire,
+        // quindi si usa il colore di sfondo delle finestre, che segue il tema.
+        .containerBackground(for: .window) {
+            if schermoIntero {
+                Color(nsColor: .windowBackgroundColor)
+            } else {
+                Rectangle().fill(.ultraThinMaterial)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didEnterFullScreenNotification)) { _ in
+            schermoIntero = true
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didExitFullScreenNotification)) { _ in
+            schermoIntero = false
+        }
         // Il download in corso non galleggia più sopra il contenuto: vive
         // dentro la sezione DOWNLOAD, insieme a quelli completati.
         //
@@ -448,6 +507,27 @@ struct ContentView: View {
         }
         .animation(.snappy, value: model.state.running)
         .onAppear { model.start() }
+        // Un download lungo non deve essere interrotto dal Mac che si addormenta.
+        .onChange(of: model.state.running) { _, inCorso in
+            vegliaSuiDownload(inCorso)
+        }
+    }
+
+    /// Tiene sveglio il Mac finché c'è un download in corso.
+    ///
+    /// Si blocca il solo sonno di sistema: lo schermo può spegnersi
+    /// tranquillamente, e non c'è motivo di tenerlo acceso per ore. Il permesso
+    /// viene restituito appena la coda si svuota, così il Mac torna a
+    /// comportarsi normalmente senza bisogno di riavviare l'app.
+    func vegliaSuiDownload(_ inCorso: Bool) {
+        if inCorso, veglia == nil {
+            veglia = ProcessInfo.processInfo.beginActivity(
+                options: [.idleSystemSleepDisabled],
+                reason: "Download in corso")
+        } else if !inCorso, let attiva = veglia {
+            ProcessInfo.processInfo.endActivity(attiva)
+            veglia = nil
+        }
     }
 }
 
@@ -523,11 +603,7 @@ struct AnimeUnityPane: View {
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 Spacer()
-                IconButton(symbol: "arrow.down.to.line",
-                           hint: model.state.running ? "Aggiungi alla coda" : "Scarica",
-                           prominent: true) { avvia() }
-                    .disabled(!pronto)
-                    .opacity(pronto ? 1 : 0.4)
+                DownloadButton(inCoda: model.state.running, attivo: pronto) { avvia() }
             }
 
             if unSolo && mode == "range" {
@@ -601,9 +677,7 @@ struct OtherPane: View {
                 ])
 
                 Spacer()
-                IconButton(symbol: "arrow.down.to.line",
-                           hint: model.state.running ? "Aggiungi alla coda" : "Scarica",
-                           prominent: true) {
+                DownloadButton(inCoda: model.state.running, attivo: !url.isEmpty) {
                     Task {
                         await model.post("/ytdlp", [
                             "url": url, "quality": quality,
@@ -611,8 +685,6 @@ struct OtherPane: View {
                         ])
                     }
                 }
-                .disabled(url.isEmpty)
-                .opacity(url.isEmpty ? 0.4 : 1)
             }
 
             Text("Il pannello opzioni completo arriverà nella prossima versione.")
@@ -970,11 +1042,8 @@ struct VibraPane: View {
                             guarda()
                         }
                     }
-                    IconButton(symbol: "arrow.down.to.line",
-                               hint: model.state.running ? "Aggiungi alla coda" : "Scarica",
-                           prominent: true) { download() }
-                        .disabled(!canDownload)
-                        .opacity(canDownload ? 1 : 0.4)
+                    DownloadButton(inCoda: model.state.running,
+                                   attivo: canDownload) { download() }
                 }
             }
         }
@@ -1239,6 +1308,32 @@ struct VibraPane: View {
         }
     }
 
+    /// Quanti episodi comporta la selezione, quando si può saperlo in anticipo.
+    ///
+    /// Serve alla barra di avanzamento: senza, il totale veniva scoperto un
+    /// episodio alla volta e la barra si suddivideva sotto gli occhi. Con
+    /// "tutte le stagioni" resta ignoto, perché gli episodi delle altre
+    /// stagioni non sono ancora stati letti.
+    var episodiAttesi: Int {
+        if isMovie { return 1 }
+        if isFlat {
+            guard let n = flatCount else { return 0 }
+            switch flatMode {
+            case "range":
+                let a = max(Int(flatStart.trimmingCharacters(in: .whitespaces)) ?? 1, 1)
+                let b = min(Int(flatEnd.trimmingCharacters(in: .whitespaces)) ?? n, n)
+                return max(0, b - a + 1)
+            case "list":
+                return flatSelection.isEmpty
+                    ? 0 : flatSelection.split(separator: ",").count
+            default:
+                return n
+            }
+        }
+        guard isSeries, !allSeasons, selectedSeason != nil else { return 0 }
+        return allEpisodes ? episodes.count : pickedEpisodes.count
+    }
+
     func download() {
         // "*" è la sintassi di VibraVid per "tutto".
         var seasonArg = ""
@@ -1267,6 +1362,7 @@ struct VibraPane: View {
                 "season": seasonArg, "episode": episodeArg,
                 "audio": audio, "subtitle": sottotitoli,
                 "path": model.destination,
+                "count": String(episodiAttesi),
             ])
         }
     }
