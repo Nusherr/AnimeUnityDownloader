@@ -1,45 +1,82 @@
-# AnimeUnity Downloader per macOS
+# Vault
 
-> App con interfaccia grafica in stile Apple per scaricare anime da AnimeUnity.
-> **Pronta all'uso**: niente da installare, niente terminale.
+> App per macOS che scarica film, serie e anime da 18 siti — e li guarda in
+> streaming senza scaricare niente.
+> **Pronta all'uso**: nessun Python da installare, nessun terminale.
 
-![AnimeUnity Downloader](assets/app-dark.png)
+![Vault](assets/vault-vibravid.png)
 
 ## ⬇️ Scarica l'app
 
-1. Vai alla pagina **[Releases](../../releases/latest)** e scarica **`AnimeUnity-Downloader.dmg`**
-2. Apri il file scaricato e **trascina l'app nella cartella Applicazioni**
-3. Apri l'app da Applicazioni (o dal Launchpad)
+1. Vai alla pagina **[Releases](../../releases/latest)** e scarica il DMG
+2. Aprilo e **trascina Vault nella cartella Applicazioni**
+3. Avviala da Applicazioni o dal Launchpad
 
-> Al **primo avvio**, se macOS mostra *"impossibile verificare lo sviluppatore"*,
+> Al **primo avvio**, se macOS dice *"impossibile verificare lo sviluppatore"*,
 > fai **clic destro sull'app → Apri → Apri**. Serve solo la prima volta.
 
-**Non devi installare Python né altro**: l'app contiene già tutto il necessario.
+Dentro c'è già tutto il necessario: **non devi installare Python** né altro.
 
-**Requisiti:** un Mac con chip Apple (M1, M2, M3… — tutti i Mac dal 2020 in poi).
+**Requisiti:** macOS 26 e un Mac con chip Apple.
 
-## Funzionalità
+## Cosa fa
 
-- **Download singoli e in batch** — un anime alla volta o una lista di più anime
-- **Scelta degli episodi** — tutti, un intervallo (es. dal 5 al 10) o episodi specifici
-- **Avanzamento in tempo reale** — velocità, dati scaricati e tempo rimanente
-- **Ripresa automatica** — se cade la connessione, riprende da dove si era interrotto
-- **Salta i doppioni** — gli episodi già scaricati non vengono ripresi
-- **Integrazione con macOS** — notifica a fine download, indicatore nella barra dei menu, tema chiaro/scuro automatico
-- **Cartella personalizzabile** — decidi tu dove salvare i video
+Tre motori nella stessa finestra, uno per scheda.
+
+### VibraVid — film, serie e anime da 18 siti
+
+La ricerca è dentro l'app: nessun link da incollare. Scegli il titolo, poi
+stagione ed episodi, e scarichi.
+
+- **18 siti**, fra cui StreamingCommunity, AnimeWorld, AltaDefinizione, RaiPlay,
+  Mediaset Infinity, Crunchyroll, Discovery+, Pluto TV, Tubi
+- **Stagioni ed episodi** — tutta la serie, una stagione, o solo quelli che scegli
+- **Audio e sottotitoli** in italiano o inglese
+- **Durata complessiva** calcolata prima di cominciare
+- I film saltano direttamente al download: non hanno stagioni da leggere
+
+### ▶︎ Guarda senza scaricare
+
+Il pulsante ▶︎ risolve il flusso e lo apre in **[IINA](https://iina.io)**, senza
+occupare un byte di disco. Il titolo compare leggibile nella finestra del
+lettore, e i segmenti che non arrivano vengono richiesti di nuovo invece di
+essere saltati, così la riproduzione non fa salti in avanti.
+
+Funziona sui siti che consegnano un flusso in chiaro. I 9 che lo consegnano
+cifrato — Crunchyroll, RaiPlay, Mediaset Infinity, Discovery+ e i canali del
+gruppo — restano solo scaricabili: un lettore esterno riceverebbe dati
+illeggibili, quindi lì il pulsante non compare affatto.
+
+### AnimeUnity — download singoli e in batch
+
+Un anime alla volta oppure una lista intera, con scelta degli episodi: tutti, un
+intervallo (dal 5 al 10) o quelli specifici che indichi.
 
 <p align="center">
-  <img src="assets/app-light.png" width="49%" alt="Tema chiaro">
-  <img src="assets/app-dark.png" width="49%" alt="Tema scuro">
+  <img src="assets/vault-animeunity.png" width="72%" alt="La scheda AnimeUnity">
 </p>
+
+### Altri siti — yt-dlp
+
+Per tutto il resto: incolli un link e yt-dlp fa il lavoro, con il pannello
+completo delle sue opzioni a disposizione.
+
+## In ogni scheda
+
+- **Avanzamento in tempo reale** — velocità, dati scaricati, tempo rimanente
+- **Coda dei download**, con quelli completati sotto
+- **Ripresa automatica** se cade la connessione
+- **Salta i doppioni**: quello che c'è già non viene riscaricato
+- **Cartella a scelta**, con notifica a fine download
+- **Tema chiaro e scuro** automatici, interfaccia nativa in Liquid Glass
 
 ---
 
 <details>
 <summary><b>Uso da riga di comando (avanzato, facoltativo)</b></summary>
 
-Chi preferisce non usare l'app grafica può usare gli script Python originali.
-Richiede Python 3 e le dipendenze del progetto:
+Gli script Python originali di AnimeUnity restano utilizzabili da soli.
+Richiedono Python 3 e le dipendenze del progetto:
 
 ```bash
 pip install -r requirements.txt
@@ -53,7 +90,7 @@ python3 anime_downloader.py <url_anime> --start 5 --end 10
 python3 anime_downloader.py <url_anime> --episodes 3,7,12
 ```
 
-Download in batch: inserire un URL per riga in `URLs.txt`, poi:
+Download in batch: un URL per riga in `URLs.txt`, poi:
 
 ```bash
 python3 main.py
@@ -66,19 +103,30 @@ Cartella di destinazione personalizzata: aggiungere `--custom-path <percorso>`.
 <details>
 <summary><b>Sviluppo e compilazione</b></summary>
 
-L'interfaccia è servita da un piccolo server locale (`gui.py` + `gui_page.html`)
-e mostrata in una finestra nativa `WKWebView` (`macos_app/main.swift`).
+L'app è divisa in due pezzi: un'interfaccia nativa SwiftUI
+(`macos_app/native/GlassApp.swift`) e un motore Python (`gui.py`) che gira come
+piccolo server locale su `127.0.0.1:8765`. L'interfaccia non scarica nulla da
+sola: parla col motore via API JSON.
 
-- **Ricompilare l'app di sviluppo:** `macos_app/build.sh`
-- **Generare il pacchetto autosufficiente + DMG:** `macos_app/make_dist.sh`
-  (scarica un Python portatile e incorpora tutto nell'app; solo Apple Silicon)
+- **Ricompilare e installare l'interfaccia:** `macos_app/native/build_native.sh`
+- **Produrre il pacchetto autosufficiente e il DMG:** `macos_app/native/make_dist.sh`
+  (incorpora un Python portatile, VibraVid, ffmpeg e yt-dlp; solo Apple Silicon)
+
+Serve macOS 26 e i Command Line Tools; Xcode non è necessario.
 
 </details>
 
 ## Crediti e licenza
 
-L'app grafica e l'impacchettamento per macOS sono un'estensione costruita sul
-progetto originale a riga di comando di
-**[Lysagxra/AnimeUnityDownloader](https://github.com/Lysagxra/AnimeUnityDownloader)**.
+Vault mette insieme il lavoro di altri, e va detto chiaramente:
 
-Distribuito sotto licenza **GPL-3.0**, la stessa del progetto originale.
+- Il downloader AnimeUnity a riga di comando è di
+  **[Lysagxra/AnimeUnityDownloader](https://github.com/Lysagxra/AnimeUnityDownloader)**
+- La ricerca multi-sito e la risoluzione dei flussi sono di
+  **[AstraeLabs/VibraVid](https://github.com/AstraeLabs/VibraVid)**, incluso nel pacchetto
+- Il lettore consigliato per la riproduzione diretta è **[IINA](https://iina.io)**
+
+L'interfaccia nativa per macOS, l'integrazione fra i tre motori e
+l'impacchettamento sono l'aggiunta di questo progetto.
+
+Distribuito sotto licenza **GPL-3.0**, la stessa dei progetti da cui deriva.
