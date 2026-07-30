@@ -68,6 +68,22 @@ except Exception:  # noqa: BLE001
     class YtdlpCancelled(Exception):
         pass
 
+
+# --- Funzione opzionale "MangaWorld", anch'essa completamente isolata ---
+# Se MangaWorld non è installato sul Mac, la scheda non compare.
+try:
+    from mangaworld_downloads import (
+        mangaworld_available,
+        run_mangaworld_download,
+    )
+    from mangaworld_downloads import _Cancelled as MangaCancelled
+except Exception:  # noqa: BLE001
+    def mangaworld_available() -> bool:
+        return False
+
+    class MangaCancelled(Exception):
+        pass
+
 # --- Funzione opzionale "VibraVid", anch'essa completamente isolata ---
 # Se VibraVid non è installato sul Mac, la scheda non compare.
 try:
@@ -235,6 +251,7 @@ class AppState:
                 ],
                 "ytdlp": ytdlp_available(),
                 "vibravid": vibravid_available(),
+                "mangaworld": mangaworld_available(),
                 "stage": self.overall.get("stage"),
             }
 
@@ -711,6 +728,102 @@ def formato_selezione(params: dict) -> str:
     return esse + " · " + ", ".join(f"E{n:02d}" for n in numeri)
 
 
+def _descrizione_manga(inizio: int | None, fine: int | None, formato: str) -> str:
+    """Riga di dettaglio mostrata nella coda: quali capitoli e in che formato."""
+    if inizio and fine:
+        quali = f"capitoli {inizio}-{fine}" if inizio != fine else f"capitolo {inizio}"
+    elif inizio:
+        quali = f"dal capitolo {inizio}"
+    elif fine:
+        quali = f"fino al capitolo {fine}"
+    else:
+        quali = "tutti i capitoli"
+    return f"{quali} · {formato.upper()}" if formato else quali
+
+
+def download_mangaworld(
+    params: dict,
+    state: AppState,
+    cancel: threading.Event,
+) -> str:
+    """Scarica un manga da MangaWorld, riusando barra e log degli altri motori."""
+    url = params.get("url", "")
+    titolo = params.get("title") or "MangaWorld"
+    # Stessa convenzione degli altri motori: la cartella scelta si usa così
+    # com'è, senza quella si scende in ~/Downloads. Prendere la sola home
+    # spargeva i capitoli nella cartella utente.
+    scelta = str(params.get("path") or "").strip()
+    base = Path(scelta).expanduser() if scelta else Path.home() / "Downloads"
+    base.mkdir(parents=True, exist_ok=True)
+
+    # Con un intervallo il numero di capitoli si sa già in partenza, e la barra
+    # può partire con il totale giusto invece di scoprirlo strada facendo.
+    # Chiedendoli tutti resta ignoto finché MangaWorld non annuncia i capitoli.
+    inizio, fine = params.get("start"), params.get("end")
+    attesi = fine - inizio + 1 if inizio and fine else 0
+
+    with state.lock:
+        state.manual_progress = True
+        state.download_path = str(base)
+        # Qui l'unità sono i capitoli, non gli episodi né le tracce.
+        state.overall = {
+            "label": titolo, "total": attesi, "done": 0,
+            "stage": "Leggo l'elenco dei capitoli…", "unit": "capitoli",
+        }
+        state.tasks = {}
+        state.speed_bps = 0.0
+        state.bytes_now = 0
+        state.bytes_total = 0
+
+    state.log(f"MangaWorld · {url}")
+
+    # Su pochi capitoli rich disegna la sola riga "Progress", senza mai la
+    # "Chapter N/M": finché non ne arriva una, l'unica informazione viva è la
+    # percentuale complessiva, e va mostrata lei o non si muove nulla.
+    per_capitolo = {"visto": False}
+
+    def on_progress(pct: float) -> None:
+        """Avanzamento complessivo, in percentuale sull'intero manga."""
+        with state.lock:
+            totale = state.overall.get("total") or 0
+            if totale:
+                state.overall["done"] = int(round(totale * pct / 100.0))
+            if not per_capitolo["visto"]:
+                state.tasks = {
+                    0: {"desc": "Download in corso",
+                        "pct": min(pct, 100.0), "visible": True},
+                }
+            state.overall["stage"] = ""
+
+    def on_chapter(indice: int, totale: int, pct: float) -> None:
+        with state.lock:
+            per_capitolo["visto"] = True
+            state.overall["total"] = totale
+            state.overall["done"] = max(indice - 1, 0)
+            state.overall["stage"] = ""
+            state.tasks = {
+                0: {"desc": f"Capitolo {indice} di {totale}",
+                    "pct": min(pct, 100.0), "visible": True},
+            }
+
+    try:
+        run_mangaworld_download(
+            url,
+            params.get("start"),
+            params.get("end"),
+            str(params.get("format") or ""),
+            str(base),
+            cancel,
+            on_progress, on_chapter, state.log,
+        )
+    except MangaCancelled as exc:
+        raise DownloadCancelled from exc
+
+    with state.lock:
+        state.overall["done"] = state.overall.get("total") or 0
+    return titolo
+
+
 def _conta_selezione(scelta: str) -> int:
     """Quanti episodi vale una selezione nella sintassi di VibraVid.
 
@@ -1003,6 +1116,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_ytdlp(data))
             elif path == "/ytdlp_formats":
                 self._json(self._handle_ytdlp_formats(data))
+            elif path == "/mangaworld":
+                self._json(self._handle_mangaworld(data))
             elif path == "/vibravid":
                 self._json(self._handle_vibravid(data))
             elif path == "/vibravid_search":
@@ -1258,6 +1373,36 @@ class Handler(BaseHTTPRequestHandler):
             return {"error": errore}
         STATE.log(f"▶️ Riproduzione in IINA: {etichetta or 'flusso remoto'}")
         return {"ok": True}
+
+    def _handle_mangaworld(self, data: dict) -> dict:
+        if not mangaworld_available():
+            return {"error": "La funzione \"MangaWorld\" non è disponibile."}
+        url = str(data.get("url", "")).strip()
+        if not url.startswith(("http://", "https://")):
+            return {"error": "Incolla il link di un manga da MangaWorld."}
+
+        def numero(chiave: str) -> int | None:
+            valore = str(data.get(chiave, "")).strip()
+            return int(valore) if valore.isdigit() and int(valore) > 0 else None
+
+        inizio, fine = numero("start"), numero("end")
+        if inizio and fine and inizio > fine:
+            return {"error": "Il capitolo iniziale viene dopo quello finale."}
+
+        params = {
+            "url": url,
+            "title": str(data.get("title", "")).strip(),
+            "start": inizio,
+            "end": fine,
+            "format": str(data.get("format", "")).strip(),
+            "path": str(data.get("path", "")).strip(),
+        }
+        error = start_job(
+            lambda cancel: download_mangaworld(params, STATE, cancel),
+            label=params["title"] or "Manga",
+            detail=_descrizione_manga(inizio, fine, params["format"]),
+        )
+        return {"error": error} if error else {"ok": True}
 
     def _handle_ytdlp_formats(self, data: dict) -> dict:
         if not ytdlp_available():

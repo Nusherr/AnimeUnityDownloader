@@ -76,6 +76,7 @@ struct ServerState: Decodable {
     var queue: [QueueItem] = []
     var ytdlp: Bool = false
     var vibravid: Bool = false
+    var mangaworld: Bool = false
 }
 
 // ================================================================== modello
@@ -206,13 +207,15 @@ func fmtEta(_ s: Double) -> String {
 /// "Singolo" e "Batch" erano due schede per lo stesso sito: ora sono un'unica
 /// scheda AnimeUnity con la modalità scelta al suo interno.
 enum Tab: String, CaseIterable, Identifiable {
-    case vibra = "VibraVid", animeunity = "AnimeUnity", other = "Altri siti"
+    case vibra = "VibraVid", animeunity = "AnimeUnity"
+    case manga = "MangaWorld", other = "Altri siti"
     var id: String { rawValue }
 
     var icon: String {
         switch self {
         case .vibra:      return "film.stack"
         case .animeunity: return "square.and.arrow.down"
+        case .manga:      return "books.vertical"
         case .other:      return "globe"
         }
     }
@@ -430,6 +433,7 @@ struct ContentView: View {
             switch t {
             case .other: return model.state.ytdlp
             case .vibra: return model.state.vibravid
+            case .manga: return model.state.mangaworld
             default: return true
             }
         }
@@ -444,6 +448,7 @@ struct ContentView: View {
                         switch tab {
                         case .vibra:      VibraPane(model: model)
                         case .animeunity: AnimeUnityPane(model: model)
+                        case .manga:      MangaPane(model: model)
                         case .other:      OtherPane(model: model)
                         }
                     }
@@ -689,6 +694,95 @@ struct OtherPane: View {
 
             Text("Il pannello opzioni completo arriverà nella prossima versione.")
                 .font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+}
+
+// --------------------------------------------------------------- MangaWorld
+/// Scheda MangaWorld: si incolla il link del manga e si scelgono i capitoli.
+///
+/// Niente ricerca interna come in VibraVid: MangaWorld non la offre, si parte
+/// sempre da un indirizzo. E niente modalità volume: senza intervallo esplicito
+/// il loro downloader apre una selezione interattiva a terminale, che qui
+/// resterebbe appesa in attesa di una risposta che nessuno può dare.
+struct MangaPane: View {
+    @ObservedObject var model: AppModel
+    @State private var url = ""
+    @State private var mode = "all"          // all | range
+    @State private var start = ""
+    @State private var end = ""
+    @State private var formato = ""          // "" | pdf | cbz
+
+    var pronto: Bool {
+        guard url.hasPrefix("http") else { return false }
+        if mode != "range" { return true }
+        // Con l'intervallo serve almeno un estremo, altrimenti equivale a "tutti".
+        return !start.trimmingCharacters(in: .whitespaces).isEmpty
+            || !end.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Nome leggibile ricavato dall'indirizzo, per l'etichetta della coda.
+    /// Gli URL di MangaWorld finiscono con "/manga/<id>/<nome-del-manga>".
+    var titolo: String {
+        guard let ultimo = url.split(separator: "/").last, !ultimo.isEmpty else {
+            return "Manga"
+        }
+        return ultimo.replacingOccurrences(of: "-", with: " ").capitalized
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            TextField("Incolla il link del manga da MangaWorld…", text: $url)
+                .textFieldStyle(.roundedBorder).controlSize(.large)
+
+            HStack(spacing: 12) {
+                Text("Capitoli").font(.caption).foregroundStyle(.secondary)
+                GlassSegmented(selection: $mode, options: [
+                    SegOption(id: "all", label: "Tutti"),
+                    SegOption(id: "range", label: "Intervallo"),
+                ])
+                Spacer()
+                DownloadButton(inCoda: model.state.running, attivo: pronto) { avvia() }
+            }
+
+            if mode == "range" {
+                HStack(spacing: 10) {
+                    Text("dal").foregroundStyle(.secondary)
+                    TextField("1", text: $start).frame(width: 62)
+                    Text("al").foregroundStyle(.secondary)
+                    TextField("ultimo", text: $end).frame(width: 62)
+                    Text("vuoto = dall'inizio / fino alla fine")
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+                .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 12) {
+                Text("Genera anche").font(.caption).foregroundStyle(.secondary)
+                GlassSegmented(selection: $formato, options: [
+                    SegOption(id: "", label: "Solo immagini"),
+                    SegOption(id: "pdf", label: "PDF"),
+                    SegOption(id: "cbz", label: "CBZ"),
+                ])
+                Spacer()
+            }
+
+            Text("Le pagine vengono salvate in una cartella per capitolo.")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+        .animation(.snappy, value: mode)
+    }
+
+    func avvia() {
+        Task {
+            await model.post("/mangaworld", [
+                "url": url.trimmingCharacters(in: .whitespacesAndNewlines),
+                "title": titolo,
+                "start": mode == "range" ? start.trimmingCharacters(in: .whitespaces) : "",
+                "end": mode == "range" ? end.trimmingCharacters(in: .whitespaces) : "",
+                "format": formato,
+                "path": model.destination,
+            ])
         }
     }
 }

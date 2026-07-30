@@ -19,6 +19,7 @@ PYVER="3.12.13"
 PYTAG="20260718"
 PYURL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTAG}/cpython-${PYVER}+${PYTAG}-aarch64-apple-darwin-install_only.tar.gz"
 VIBRAVID_REPO="https://github.com/AstraeLabs/VibraVid.git"
+MANGAWORLD_REPO="https://github.com/Lysagxra/MangaWorldDownloader.git"
 
 echo "▸ Compilo l'app"
 "$HERE/build_native.sh" >/dev/null
@@ -29,7 +30,7 @@ cp -R "/Applications/Vault.app" "$APP"
 # La versione distribuibile non punta a un percorso di sviluppo.
 rm -f "$APP/Contents/Resources/project_path.txt"
 rm -rf "$APP/Contents/Resources/python" "$APP/Contents/Resources/app" \
-       "$APP/Contents/Resources/vibravid"
+       "$APP/Contents/Resources/vibravid" "$APP/Contents/Resources/mangaworld"
 
 echo "▸ Incorporo il Python portatile"
 CACHE="$HERE/../.python_cache.tar.gz"
@@ -42,6 +43,7 @@ APPDIR="$APP/Contents/Resources/app"
 mkdir -p "$APPDIR"
 cp "$PROGETTO/gui.py" "$PROGETTO/gui_page.html" "$PROGETTO/anime_downloader.py" \
    "$PROGETTO/ytdlp_downloads.py" "$PROGETTO/vibravid_downloads.py" \
+   "$PROGETTO/mangaworld_downloads.py" "$PROGETTO/mangaworld_driver.py" \
    "$PROGETTO/requirements.txt" "$PROGETTO/LICENSE" "$APPDIR/"
 cp -R "$PROGETTO/src" "$APPDIR/src"
 # ffmpeg, ffprobe e yt-dlp: VibraVid li cerca nel PATH e senza si rifiuta di partire.
@@ -55,10 +57,22 @@ rm -rf "$STAGE/vibravid-tmp/.git" "$STAGE/vibravid-tmp/.github" \
 # Le credenziali restano vuote: chi installa userà le proprie, se vorrà.
 mv "$STAGE/vibravid-tmp" "$APP/Contents/Resources/vibravid"
 
-echo "▸ Installo le dipendenze (progetto + VibraVid) nello stesso Python"
+echo "▸ Clono MangaWorld da GitHub"
+git clone --depth 1 --quiet "$MANGAWORLD_REPO" "$STAGE/mangaworld-tmp"
+rm -rf "$STAGE/mangaworld-tmp/.git" "$STAGE/mangaworld-tmp/.github" \
+       "$STAGE/mangaworld-tmp/assets"
+mv "$STAGE/mangaworld-tmp" "$APP/Contents/Resources/mangaworld"
+
+echo "▸ Installo le dipendenze (progetto + VibraVid + MangaWorld) nello stesso Python"
+# brotlicffi non è nei requirements di MangaWorld ma senza non funziona nulla:
+# mangaworld.ac risponde in Brotli e aiohttp, col pacchetto Brotli di Google,
+# chiama process(data, max_length) su un'API che accetta un argomento solo.
+# Fallisce con "Can not decode content-encoding: br" a ogni download.
 "$PY" -m pip install --quiet --disable-pip-version-check \
   -r "$PROGETTO/requirements.txt" \
-  -r "$APP/Contents/Resources/vibravid/requirements.txt"
+  -r "$APP/Contents/Resources/vibravid/requirements.txt" \
+  -r "$APP/Contents/Resources/mangaworld/requirements.txt" \
+  brotlicffi
 
 echo "▸ Alleggerisco il pacchetto"
 find "$APP/Contents/Resources" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true

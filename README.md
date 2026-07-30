@@ -1,7 +1,7 @@
 # Vault
 
-> App per macOS che scarica film, serie e anime da 18 siti — e li guarda in
-> streaming senza scaricare niente.
+> App per macOS che scarica film, serie, anime e manga — e guarda in streaming
+> senza scaricare niente.
 > **Pronta all'uso**: nessun Python da installare, nessun terminale.
 
 ![Vault](assets/vault-vibravid.png)
@@ -21,7 +21,7 @@ Dentro c'è già tutto il necessario: **non devi installare Python** né altro.
 
 ## Cosa fa
 
-Tre motori nella stessa finestra, uno per scheda.
+Quattro motori nella stessa finestra, uno per scheda.
 
 ### VibraVid — film, serie e anime da 18 siti
 
@@ -55,6 +55,12 @@ intervallo (dal 5 al 10) o quelli specifici che indichi.
 <p align="center">
   <img src="assets/vault-animeunity.png" width="72%" alt="La scheda AnimeUnity">
 </p>
+
+### MangaWorld — manga, capitoli e PDF/CBZ
+
+Si incolla il link del manga e si scaricano tutti i capitoli o un intervallo.
+Le pagine finiscono in una cartella per capitolo, e volendo si genera anche un
+**PDF** o un **CBZ** pronto da leggere.
 
 ### Altri siti — yt-dlp
 
@@ -122,6 +128,9 @@ Vault mette insieme il lavoro di altri, e va detto chiaramente:
 
 - Il downloader AnimeUnity a riga di comando è di
   **[Lysagxra/AnimeUnityDownloader](https://github.com/Lysagxra/AnimeUnityDownloader)**
+- Il downloader dei manga è di
+  **[Lysagxra/MangaWorldDownloader](https://github.com/Lysagxra/MangaWorldDownloader)**,
+  incluso nel pacchetto
 - La ricerca multi-sito e la risoluzione dei flussi sono di
   **[AstraeLabs/VibraVid](https://github.com/AstraeLabs/VibraVid)**, incluso nel pacchetto
 - Il lettore consigliato per la riproduzione diretta è **[IINA](https://iina.io)**
