@@ -398,7 +398,18 @@ struct ContentView: View {
                         case .other:      OtherPane(model: model)
                         }
                     }
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    // La barra schede cambia `tab` dentro una molla con rimbalzo,
+                    // ed è giusto così: è quella a dare il movimento liquido
+                    // all'indicatore. Ma un rimbalzo su un'opacità la porta oltre
+                    // il valore finale e poi indietro, e mentre le due schede si
+                    // incrociano i controlli si schiariscono e riscuriscono — il
+                    // selettore del sito, chiaro e piatto, è dove si nota di più.
+                    // La transizione si porta quindi la propria curva, senza
+                    // rimbalzo, così la dissolvenza procede in un verso solo.
+                    .transition(
+                        .opacity.combined(with: .move(edge: .top))
+                            .animation(.easeOut(duration: 0.24))
+                    )
 
                     DestinationRow(model: model)
                     Divider()
@@ -963,6 +974,17 @@ struct VibraPane: View {
         seasons = []; isMovie = false; allSeasons = false; selectedSeason = nil
         seasonsError = nil
         episodes = []; allEpisodes = true; pickedEpisodes = []
+
+        // Un film non ha stagioni, e la ricerca l'ha già detto: è la stessa
+        // fonte che scrive "· film" nella riga qui sopra, e loadSeasons() la
+        // tratta comunque come autorevole. Chiedere le stagioni al server
+        // significava aspettare un giro in rete intero per farsi rispondere
+        // "nessuna stagione" e concludere quello che si sapeva già in partenza.
+        // Qualunque altro tipo continua a passare dal server come prima.
+        if r.type == "movie" {
+            isMovie = true
+            return
+        }
         loadSeasons()
     }
 
