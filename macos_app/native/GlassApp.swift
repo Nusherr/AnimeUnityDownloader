@@ -437,6 +437,7 @@ struct FloatingTabBar: View {
 
 // ================================================================== interfaccia
 struct ContentView: View {
+    @Environment(\.controlActiveState) private var stato
     @StateObject private var model = AppModel.shared
     @State private var tab: Tab = .vibra
     @State private var showLog = false
@@ -486,6 +487,22 @@ struct ContentView: View {
                     DestinationRow(model: model)
                     Divider()
                     DownloadsSection(model: model, showLog: $showLog)
+
+                    // Firma in fondo, dopo tutto il resto: si vede scorrendo,
+                    // ma non ruba attenzione all'area di lavoro come farebbe
+                    // accanto alle schede o in cima.
+                    HStack(spacing: 5) {
+                        Spacer()
+                        Text("Vault · di Lorenzo Pecorale")
+                        Text("·")
+                        Link("GitHub",
+                             destination: URL(string: "https://github.com/Nusherr/Vault")!)
+                            .foregroundStyle(accento(stato))
+                        Spacer()
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 6)
                 }
                 .padding(22)
                 .frame(maxWidth: 620)
@@ -2200,6 +2217,55 @@ struct MenuBarLabel: View {
     }
 }
 
+// ==================================================================== crediti
+/// Testo del pannello "Informazioni su Vault".
+///
+/// Sta nel pannello di sistema e non in una finestra nostra perché è lì che
+/// chiunque su un Mac va a cercare crediti e versione, e perché i link si
+/// aprono da soli senza doverli gestire a mano.
+///
+/// I crediti non sono una cortesia: Vault mette insieme tre progetti altrui
+/// sotto GPL-3.0, che l'attribuzione la richiede.
+func testoCrediti() -> NSAttributedString {
+    let testo = NSMutableAttributedString()
+
+    func riga(_ s: String, size: CGFloat = 11,
+              colore: NSColor = .labelColor, peso: NSFont.Weight = .regular) {
+        testo.append(NSAttributedString(string: s, attributes: [
+            .font: NSFont.systemFont(ofSize: size, weight: peso),
+            .foregroundColor: colore,
+        ]))
+    }
+
+    func collegamento(_ etichetta: String, _ indirizzo: String) {
+        testo.append(NSAttributedString(string: etichetta, attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .link: URL(string: indirizzo) as Any,
+        ]))
+    }
+
+    riga("Scarica film, serie, anime e manga, e li guarda in streaming.\n\n")
+
+    riga("Di Lorenzo Pecorale\n", peso: .semibold)
+    collegamento("github.com/Nusherr/Vault", "https://github.com/Nusherr/Vault")
+    riga("\n\n")
+
+    riga("Costruita sul lavoro di\n", peso: .semibold)
+    collegamento("Lysagxra", "https://github.com/Lysagxra")
+    riga(" — AnimeUnity e MangaWorld\n", colore: .secondaryLabelColor)
+    collegamento("AstraeLabs", "https://github.com/AstraeLabs/VibraVid")
+    riga(" — VibraVid, ricerca multi-sito\n", colore: .secondaryLabelColor)
+    collegamento("yt-dlp", "https://github.com/yt-dlp/yt-dlp")
+    riga(" — tutti gli altri siti\n", colore: .secondaryLabelColor)
+    collegamento("IINA", "https://iina.io")
+    riga(" — riproduzione diretta\n\n", colore: .secondaryLabelColor)
+
+    riga("Distribuita sotto licenza GPL-3.0, la stessa dei progetti da cui deriva.",
+         colore: .secondaryLabelColor)
+
+    return testo
+}
+
 // ===================================================================== app
 @main
 struct GlassApp: App {
@@ -2214,6 +2280,25 @@ struct GlassApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
+        .commands {
+            // Il pannello di sistema, con dentro i nostri crediti: la voce
+            // "Informazioni su Vault" resta dov'è e fa quel che ci si aspetta.
+            CommandGroup(replacing: .appInfo) {
+                Button("Informazioni su Vault") {
+                    NSApp.orderFrontStandardAboutPanel(options: [
+                        .credits: testoCrediti(),
+                    ])
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
+            CommandGroup(after: .appInfo) {
+                Button("Vault su GitHub") {
+                    if let u = URL(string: "https://github.com/Nusherr/Vault") {
+                        NSWorkspace.shared.open(u)
+                    }
+                }
+            }
+        }
 
         MenuBarExtra {
             MenuBarContent(model: AppModel.shared)
