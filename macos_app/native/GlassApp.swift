@@ -250,7 +250,14 @@ final class AppModel: ObservableObject {
                 : await post("/app_update_check", ["forza": "1"])
 
             if let err = obj["error"] as? String {
-                if !automatico { avvisa("Controllo non riuscito", err) }
+                if !automatico {
+                    // Girare da una copia di sviluppo non è un guasto: dargli
+                    // il titolo di un errore farebbe cercare un problema che
+                    // non esiste.
+                    avvisa(obj["sviluppo"] as? Bool == true
+                            ? "Copia di sviluppo"
+                            : "Controllo non riuscito", err)
+                }
                 return
             }
             guard obj["nuova"] as? Bool == true else {

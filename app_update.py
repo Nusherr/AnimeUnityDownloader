@@ -107,7 +107,21 @@ def controlla(*, forza: bool = False) -> dict:
     """
     attuale = rilascio_installato()
     if not attuale:
-        return {"error": "Aggiornamento disponibile solo nell'app installata."}
+        # Succede sulla copia di sviluppo: l'interfaccia sta in /Applications
+        # ma il codice viene letto dalla cartella del progetto, quindi
+        # sostituire il bundle non aggiornerebbe nulla — smonterebbe solo
+        # l'ambiente di lavoro. Il messaggio dev'essere chiaro su questo:
+        # dire "solo nell'app installata" a chi ce l'ha installata suona
+        # semplicemente sbagliato.
+        return {
+            "error": "Questa è la copia di sviluppo di Vault, che legge il "
+                     "codice dalla cartella del progetto. Si aggiorna "
+                     "ricostruendola con build_native.sh, non da GitHub.",
+            # Distingue il "qui non si applica" dal guasto vero: l'interfaccia
+            # ci sceglie il titolo, e "Controllo non riuscito" su questo caso
+            # farebbe pensare a un problema che non c'è.
+            "sviluppo": True,
+        }
     if not forza and not serve_controllare():
         return {"nuova": False, "attuale": attuale, "motivo": "controllato di recente"}
 
