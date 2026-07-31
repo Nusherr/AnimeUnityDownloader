@@ -58,9 +58,14 @@ intervallo (dal 5 al 10) o quelli specifici che indichi.
 
 ### MangaWorld — manga, capitoli e PDF/CBZ
 
-Si incolla il link del manga e si scaricano tutti i capitoli o un intervallo.
-Le pagine finiscono in una cartella per capitolo, e volendo si genera anche un
-**PDF** o un **CBZ** pronto da leggere.
+Lo stesso campo cerca e apre i link: se scrivi un titolo lo cerca, se incolli
+un indirizzo lo apre. I risultati mostrano tipo, stato e autore, che su
+MangaWorld servono a distinguere fra titoli quasi omonimi.
+
+Scelto il manga, l'app dice **quanti capitoli** ci sono e li fa prendere tutti,
+per intervallo o singolarmente. Si sceglie **come salvarli** — PDF, CBZ o
+immagini sciolte — e la scelta è esclusiva: chiedendo un PDF non ti ritrovi
+anche la cartella di pagine a occupare il doppio.
 
 ### Altri siti — yt-dlp
 
@@ -71,10 +76,22 @@ completo delle sue opzioni a disposizione.
 
 - **Avanzamento in tempo reale** — velocità, dati scaricati, tempo rimanente
 - **Coda dei download**, con quelli completati sotto
+- **Cronologia** che resta dopo la chiusura: cosa hai scaricato, quanto pesa, quando
 - **Ripresa automatica** se cade la connessione
 - **Salta i doppioni**: quello che c'è già non viene riscaricato
+- **Il Mac non si addormenta** mentre un download è in corso
 - **Cartella a scelta**, con notifica a fine download
 - **Tema chiaro e scuro** automatici, interfaccia nativa in Liquid Glass
+
+## Si tiene aggiornata da sola
+
+Una volta al giorno Vault guarda se ne è uscita una versione nuova. Se c'è, lo
+dice e — accettando — la scarica, si sostituisce e si riavvia: niente da
+scaricare a mano, niente da trascinare.
+
+Anche **yt-dlp** si aggiorna per conto suo, ed è quello che conta di più: i siti
+cambiano di continuo e la correzione arriva con una versione nuova, spesso ogni
+settimana. Senza, la scheda "Altri siti" invecchierebbe male.
 
 ---
 
