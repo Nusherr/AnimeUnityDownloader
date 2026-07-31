@@ -9,6 +9,12 @@
 set -e
 cd "$(dirname "$0")"
 
+# Tag della release sotto cui questo pacchetto verrà pubblicato su GitHub.
+# È il numero su cui l'app decide se esiste un aggiornamento, ed è separato
+# dalla versione mostrata all'utente: quella resta 1.0 anche pubblicando
+# v1.0.5, v1.0.6 e così via. Va alzato PRIMA di costruire il DMG da pubblicare.
+RILASCIO="v1.0"
+
 PROGETTO="$(cd ../.. && pwd)"          # cartella che contiene gui.py
 APP="/Applications/Vault.app"
 
@@ -27,7 +33,7 @@ printf '%s' "$PROGETTO" > "$APP/Contents/Resources/project_path.txt"
 ICONA="assets/AppIcon.icns"
 [ -f "$ICONA" ] && cp "$ICONA" "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -37,6 +43,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>GlassApp</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>VaultRilascio</key><string>$RILASCIO</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSHumanReadableCopyright</key><string>GPL-3.0 · github.com/Nusherr/Vault</string>
   <key>NSHighResolutionCapable</key><true/>

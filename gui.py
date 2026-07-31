@@ -100,6 +100,18 @@ except Exception:  # noqa: BLE001
     class MangaCancelled(Exception):
         pass
 
+
+# --- Aggiornamento di Vault stessa, anch'esso isolato ---
+try:
+    from app_update import controlla as app_controlla
+    from app_update import installa as app_installa
+except Exception:  # noqa: BLE001
+    def app_controlla(*, forza: bool = False) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def app_installa(tag_dmg: str) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
 # --- Funzione opzionale "VibraVid", anch'essa completamente isolata ---
 # Se VibraVid non è installato sul Mac, la scheda non compare.
 try:
@@ -256,6 +268,8 @@ class AppState:
         self.manual_progress = False  # True quando l'avanzamento lo gestisce yt-dlp
         self.last_poll = time.time()
         self.completed = _leggi_cronologia()
+        # Versione nuova trovata dal controllo in sottofondo, se c'è.
+        self.aggiornamento: dict | None = None
 
     def registra_completato(self, voce: dict) -> None:
         """Aggiunge un download finito alla cronologia, e la salva su disco.
@@ -334,6 +348,7 @@ class AppState:
                 "ytdlp": ytdlp_available(),
                 "vibravid": vibravid_available(),
                 "mangaworld": mangaworld_available(),
+                "aggiornamento": self.aggiornamento,
                 "stage": self.overall.get("stage"),
             }
 
@@ -1278,6 +1293,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_ytdlp(data))
             elif path == "/ytdlp_formats":
                 self._json(self._handle_ytdlp_formats(data))
+            elif path == "/app_update_check":
+                self._json(app_controlla(forza=bool(data.get("forza"))))
+            elif path == "/app_update_install":
+                self._json(app_installa(str(data.get("dmg", "")).strip()))
             elif path == "/ytdlp_update":
                 # Richiesto a mano: si controlla comunque, senza aspettare
                 # che sia passato un giorno dall'ultima volta.
@@ -1658,11 +1677,19 @@ def controlla_aggiornamenti() -> None:
     esce all'incirca una volta a settimana.
     """
     time.sleep(8)
-    if not ytdlp_available():
-        return
-    esito = aggiorna_ytdlp()
-    if esito.get("aggiornato"):
-        STATE.log(f"⬆️ yt-dlp aggiornato: {esito.get('da')} → {esito.get('a')}")
+    if ytdlp_available():
+        esito = aggiorna_ytdlp()
+        if esito.get("aggiornato"):
+            STATE.log(f"⬆️ yt-dlp aggiornato: {esito.get('da')} → {esito.get('a')}")
+
+    # Vault stessa: qui non si scarica niente da soli, ci si limita a segnare
+    # che c'è una versione nuova. Sostituire l'applicazione mentre qualcuno la
+    # sta usando è una decisione sua, non nostra.
+    esito = app_controlla()
+    if esito.get("nuova"):
+        with STATE.lock:
+            STATE.aggiornamento = esito
+        STATE.log(f"⬆️ Disponibile la versione {esito.get('tag')} di Vault.")
 
 
 def idle_watchdog() -> None:

@@ -189,3 +189,5 @@ cronologia.json
 # Binari aggiornati a runtime: dati, non codice.
 aggiornamenti/
 .ytdlp-controllo
+
+.vault-controllo

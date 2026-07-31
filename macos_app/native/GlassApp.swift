@@ -95,6 +95,20 @@ struct ServerState: Decodable {
     var ytdlp: Bool = false
     var vibravid: Bool = false
     var mangaworld: Bool = false
+    var aggiornamento: AggiornamentoInfo? = nil
+}
+
+/// Versione nuova di Vault trovata su GitHub dal controllo in sottofondo.
+struct AggiornamentoInfo: Decodable {
+    var nuova: Bool = false
+    var tag: String = ""
+    var note: String = ""
+    var dmg: String = ""
+    var attuale: String = ""
+
+    var dizionario: [String: Any] {
+        ["nuova": nuova, "tag": tag, "note": note, "dmg": dmg, "attuale": attuale]
+    }
 }
 
 // ================================================================== modello
@@ -157,6 +171,66 @@ final class AppModel: ObservableObject {
     func cancel() { Task { await post("/cancel", [:]) } }
     func rimuoviDallaCoda(_ id: Int) { Task { await post("/queue_remove", ["id": id]) } }
     func clearCompleted() { Task { await post("/clear_completed", [:]) } }
+
+    /// Cerca una versione nuova di Vault e, se c'è, propone di installarla.
+    ///
+    /// - Parameter automatico: true quando parte da sé dopo il controllo in
+    ///   sottofondo. In quel caso, se non c'è nulla di nuovo, tace: un avviso
+    ///   "sei aggiornato" che nessuno ha chiesto è solo un fastidio.
+    func aggiornaApp(automatico: Bool = false) {
+        Task {
+            let obj = automatico
+                ? aggiornamentoInSospeso ?? [:]
+                : await post("/app_update_check", ["forza": "1"])
+
+            if let err = obj["error"] as? String {
+                if !automatico { avvisa("Controllo non riuscito", err) }
+                return
+            }
+            guard obj["nuova"] as? Bool == true else {
+                if !automatico {
+                    avvisa("Vault è aggiornata",
+                           "Versione \((obj["attuale"] as? String) ?? "in uso").")
+                }
+                return
+            }
+
+            let tag = (obj["tag"] as? String) ?? ""
+            let note = (obj["note"] as? String) ?? ""
+            let scelta = NSAlert()
+            scelta.messageText = "Disponibile la versione \(tag)"
+            scelta.informativeText = note.isEmpty
+                ? "Vault può aggiornarsi e riavviarsi da sola."
+                : note
+            scelta.addButton(withTitle: "Aggiorna e riavvia")
+            scelta.addButton(withTitle: "Più tardi")
+            guard scelta.runModal() == .alertFirstButtonReturn else { return }
+
+            FinestraAvanzamento.mostra("Scarico la versione \(tag)…")
+            let esito = await post("/app_update_install",
+                                   ["dmg": (obj["dmg"] as? String) ?? ""])
+            FinestraAvanzamento.chiudi()
+
+            if esito["pronto"] as? Bool == true {
+                // Lo scambio lo fa uno script che aspetta la nostra uscita:
+                // da qui in poi l'unica cosa utile è chiudersi.
+                NSApp.terminate(nil)
+            } else {
+                avvisa("Aggiornamento non riuscito",
+                       (esito["error"] as? String) ?? "Riprova più tardi.")
+            }
+        }
+    }
+
+    /// L'aggiornamento trovato dal controllo in sottofondo, se c'è.
+    var aggiornamentoInSospeso: [String: Any]? { state.aggiornamento?.dizionario }
+
+    func avvisa(_ titolo: String, _ testo: String) {
+        let a = NSAlert()
+        a.messageText = titolo
+        a.informativeText = testo
+        a.runModal()
+    }
 
     /// Cerca subito una versione nuova di yt-dlp e dice com'è andata.
     /// L'esito va detto: chi lo chiede lo fa perché qualcosa non funziona, e
@@ -466,6 +540,9 @@ struct ContentView: View {
     @State private var tab: Tab = .vibra
     @State private var showLog = false
     @State private var schermoIntero = false
+    /// Versione già proposta in questa sessione, per non riproporla a ogni
+    /// aggiornamento dello stato.
+    @State private var aggiornamentoProposto: String? = nil
 
     /// Permesso che impedisce al Mac di addormentarsi mentre si scarica.
     @State private var veglia: NSObjectProtocol? = nil
@@ -571,6 +648,14 @@ struct ContentView: View {
         }
         .animation(.snappy, value: model.state.running)
         .onAppear { model.start() }
+        // Il controllo gira in sottofondo nel motore; qui si intercetta il
+        // momento in cui trova qualcosa, una volta sola per sessione: chi
+        // risponde "più tardi" non deve rivederlo a ogni battito dello stato.
+        .onChange(of: model.state.aggiornamento?.tag) { _, tag in
+            guard let tag, !tag.isEmpty, tag != aggiornamentoProposto else { return }
+            aggiornamentoProposto = tag
+            model.aggiornaApp(automatico: true)
+        }
         // Un download lungo non deve essere interrotto dal Mac che si addormenta.
         .onChange(of: model.state.running) { _, inCorso in
             vegliaSuiDownload(inCorso)
@@ -2422,6 +2507,39 @@ struct AboutView: View {
     }
 }
 
+/// Finestrella con la rotellina, per le attese lunghe e senza percentuale —
+/// lo scaricamento dell'aggiornamento sono più di cento megabyte, e lasciare
+/// l'app apparentemente ferma sarebbe peggio che mostrare un'attesa generica.
+enum FinestraAvanzamento {
+    static var finestra: NSWindow?
+
+    static func mostra(_ testo: String) {
+        chiudi()
+        let vista = VStack(spacing: 14) {
+            ProgressView().controlSize(.large)
+            Text(testo).font(.callout).foregroundStyle(.secondary)
+        }
+        .padding(34)
+        .frame(width: 300)
+
+        let w = NSWindow(contentRect: .zero,
+                         styleMask: [.titled, .fullSizeContentView],
+                         backing: .buffered, defer: false)
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
+        w.isReleasedWhenClosed = false
+        w.contentView = NSHostingView(rootView: vista)
+        w.center()
+        w.makeKeyAndOrderFront(nil)
+        finestra = w
+    }
+
+    static func chiudi() {
+        finestra?.close()
+        finestra = nil
+    }
+}
+
 /// Tiene viva la finestra delle informazioni: creata alla prima apertura e
 /// riportata in primo piano alle successive, invece di aprirne una ogni volta.
 enum FinestraAbout {
@@ -2470,6 +2588,9 @@ struct GlassApp: App {
                 // Il controllo avviene comunque da solo una volta al giorno;
                 // questa voce serve a chi non vuole aspettare, tipicamente
                 // quando un sito ha smesso di funzionare.
+                Button("Cerca aggiornamenti di Vault…") {
+                    AppModel.shared.aggiornaApp()
+                }
                 Button("Controlla aggiornamenti di yt-dlp") {
                     AppModel.shared.aggiornaYtdlp()
                 }

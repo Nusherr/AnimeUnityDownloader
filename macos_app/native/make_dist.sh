@@ -44,6 +44,7 @@ mkdir -p "$APPDIR"
 cp "$PROGETTO/gui.py" "$PROGETTO/gui_page.html" "$PROGETTO/anime_downloader.py" \
    "$PROGETTO/ytdlp_downloads.py" "$PROGETTO/vibravid_downloads.py" \
    "$PROGETTO/mangaworld_downloads.py" "$PROGETTO/mangaworld_driver.py" \
+   "$PROGETTO/app_update.py" \
    "$PROGETTO/requirements.txt" "$PROGETTO/LICENSE" "$APPDIR/"
 cp -R "$PROGETTO/src" "$APPDIR/src"
 # ffmpeg, ffprobe e yt-dlp: VibraVid li cerca nel PATH e senza si rifiuta di partire.
