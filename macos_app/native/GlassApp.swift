@@ -493,7 +493,7 @@ struct ContentView: View {
                     // accanto alle schede o in cima.
                     HStack(spacing: 5) {
                         Spacer()
-                        Text("Vault · di Lorenzo Pecorale")
+                        Text("by Lorenzo Pecorale")
                         Text("·")
                         Link("GitHub",
                              destination: URL(string: "https://github.com/Nusherr/Vault")!)
@@ -2218,53 +2218,215 @@ struct MenuBarLabel: View {
 }
 
 // ==================================================================== crediti
-/// Testo del pannello "Informazioni su Vault".
+/// Il marchio GitHub, disegnato dal suo tracciato.
 ///
-/// Sta nel pannello di sistema e non in una finestra nostra perché è lì che
-/// chiunque su un Mac va a cercare crediti e versione, e perché i link si
-/// aprono da soli senza doverli gestire a mano.
-///
-/// I crediti non sono una cortesia: Vault mette insieme tre progetti altrui
-/// sotto GPL-3.0, che l'attribuzione la richiede.
-func testoCrediti() -> NSAttributedString {
-    let testo = NSMutableAttributedString()
+/// Fra i simboli di sistema non c'è, e un'icona generica accanto a un link
+/// verso GitHub si capirebbe a metà. Il tracciato è quello ufficiale su una
+/// griglia 24×24, riscalato al riquadro che gli si dà.
+struct SegnoGitHub: Shape {
+    static let tracciato = """
+    M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793\
+    -.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333\
+    -1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 \
+    1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604\
+    -2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124\
+    -.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 \
+    3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23\
+    .653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609\
+    -2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694\
+    .801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z
+    """
 
-    func riga(_ s: String, size: CGFloat = 11,
-              colore: NSColor = .labelColor, peso: NSFont.Weight = .regular) {
-        testo.append(NSAttributedString(string: s, attributes: [
-            .font: NSFont.systemFont(ofSize: size, weight: peso),
-            .foregroundColor: colore,
-        ]))
+    func path(in rect: CGRect) -> Path {
+        let scala = min(rect.width, rect.height) / 24
+        var p = Path()
+        var punto = CGPoint.zero
+        var partenza = CGPoint.zero
+        var ultimoControllo: CGPoint? = nil
+
+        var numeri: [CGFloat] = []
+        var comando: Character = "M"
+        var accumulatore = ""
+
+        func chiudiNumero() {
+            if !accumulatore.isEmpty, let v = Double(accumulatore) {
+                numeri.append(CGFloat(v))
+            }
+            accumulatore = ""
+        }
+
+        func applica() {
+            let relativo = comando.isLowercase
+            func assoluto(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+                relativo ? CGPoint(x: punto.x + x, y: punto.y + y)
+                         : CGPoint(x: x, y: y)
+            }
+            var i = 0
+            switch Character(comando.lowercased()) {
+            case "m":
+                while i + 1 < numeri.count {
+                    let d = assoluto(numeri[i], numeri[i + 1])
+                    // Dopo il primo, i numeri di un "m" valgono come "l".
+                    if i == 0 { p.move(to: d); partenza = d } else { p.addLine(to: d) }
+                    punto = d; i += 2
+                }
+            case "l":
+                while i + 1 < numeri.count {
+                    let d = assoluto(numeri[i], numeri[i + 1])
+                    p.addLine(to: d); punto = d; i += 2
+                }
+            case "h":
+                while i < numeri.count {
+                    let d = CGPoint(x: relativo ? punto.x + numeri[i] : numeri[i],
+                                    y: punto.y)
+                    p.addLine(to: d); punto = d; i += 1
+                }
+            case "v":
+                while i < numeri.count {
+                    let d = CGPoint(x: punto.x,
+                                    y: relativo ? punto.y + numeri[i] : numeri[i])
+                    p.addLine(to: d); punto = d; i += 1
+                }
+            case "c":
+                while i + 5 < numeri.count {
+                    let c1 = assoluto(numeri[i], numeri[i + 1])
+                    let c2 = assoluto(numeri[i + 2], numeri[i + 3])
+                    let d = assoluto(numeri[i + 4], numeri[i + 5])
+                    p.addCurve(to: d, control1: c1, control2: c2)
+                    ultimoControllo = c2; punto = d; i += 6
+                }
+            case "s":
+                while i + 3 < numeri.count {
+                    let riflesso = ultimoControllo.map {
+                        CGPoint(x: 2 * punto.x - $0.x, y: 2 * punto.y - $0.y)
+                    } ?? punto
+                    let c2 = assoluto(numeri[i], numeri[i + 1])
+                    let d = assoluto(numeri[i + 2], numeri[i + 3])
+                    p.addCurve(to: d, control1: riflesso, control2: c2)
+                    ultimoControllo = c2; punto = d; i += 4
+                }
+            case "z":
+                p.closeSubpath(); punto = partenza
+            default:
+                break
+            }
+            if Character(comando.lowercased()) != "c",
+               Character(comando.lowercased()) != "s" {
+                ultimoControllo = nil
+            }
+            numeri = []
+        }
+
+        // Gli spazi non si saltano: separano i numeri. Ignorandoli, "12 0"
+        // diventava 120 e il tracciato usciva vuoto.
+        for c in Self.tracciato {
+            if c.isWhitespace || c == "," {
+                chiudiNumero()
+            } else if c.isLetter {
+                chiudiNumero(); applica(); comando = c
+            } else if c == "-" && !accumulatore.isEmpty {
+                chiudiNumero(); accumulatore = "-"
+            } else if c == "." && accumulatore.contains(".") {
+                chiudiNumero(); accumulatore = "."
+            } else {
+                accumulatore.append(c)
+            }
+        }
+        chiudiNumero(); applica()
+
+        return p.applying(CGAffineTransform(scaleX: scala, y: scala))
+            .offsetBy(dx: rect.minX, dy: rect.minY)
     }
-
-    func collegamento(_ etichetta: String, _ indirizzo: String) {
-        testo.append(NSAttributedString(string: etichetta, attributes: [
-            .font: NSFont.systemFont(ofSize: 11),
-            .link: URL(string: indirizzo) as Any,
-        ]))
-    }
-
-    riga("Scarica film, serie, anime e manga, e li guarda in streaming.\n\n")
-
-    riga("Di Lorenzo Pecorale\n", peso: .semibold)
-    collegamento("github.com/Nusherr/Vault", "https://github.com/Nusherr/Vault")
-    riga("\n\n")
-
-    riga("Costruita sul lavoro di\n", peso: .semibold)
-    collegamento("Lysagxra", "https://github.com/Lysagxra")
-    riga(" — AnimeUnity e MangaWorld\n", colore: .secondaryLabelColor)
-    collegamento("AstraeLabs", "https://github.com/AstraeLabs/VibraVid")
-    riga(" — VibraVid, ricerca multi-sito\n", colore: .secondaryLabelColor)
-    collegamento("yt-dlp", "https://github.com/yt-dlp/yt-dlp")
-    riga(" — tutti gli altri siti\n", colore: .secondaryLabelColor)
-    collegamento("IINA", "https://iina.io")
-    riga(" — riproduzione diretta\n\n", colore: .secondaryLabelColor)
-
-    riga("Distribuita sotto licenza GPL-3.0, la stessa dei progetti da cui deriva.",
-         colore: .secondaryLabelColor)
-
-    return testo
 }
+
+/// Pannello "Informazioni su Vault": icona, nome, versione, autore e il
+/// collegamento a GitHub, incolonnati al centro.
+///
+/// Sostituisce il pannello di sistema, che accetta solo un blocco di testo e
+/// non permette di impaginare nulla.
+struct AboutView: View {
+    @Environment(\.controlActiveState) private var stato
+    @State private var sopra = false
+
+    var versione: String {
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+        return "Versione \((v as? String) ?? "1.0")"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable().interpolation(.high)
+                .frame(width: 96, height: 96)
+                .padding(.bottom, 12)
+
+            Text("Vault")
+                .font(.system(size: 24, weight: .semibold))
+
+            Text(versione)
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+
+            Text("by Lorenzo Pecorale")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 10)
+
+            Button {
+                if let u = URL(string: "https://github.com/Nusherr") {
+                    NSWorkspace.shared.open(u)
+                }
+            } label: {
+                SegnoGitHub()
+                    .fill(sopra ? Color.primary : Color.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .onHover { sopra = $0 }
+            .help("github.com/Nusherr")
+            .padding(.top, 16)
+
+            // L'attribuzione non è decorativa: Vault include tre progetti
+            // altrui sotto GPL-3.0, che la richiede. Sta in fondo e in
+            // piccolo, ma c'è.
+            Text("Costruita su VibraVid, AnimeUnity, MangaWorld e yt-dlp\nGPL-3.0")
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 22)
+        }
+        .padding(.horizontal, 34)
+        .padding(.vertical, 30)
+        .frame(width: 320)
+    }
+}
+
+/// Tiene viva la finestra delle informazioni: creata alla prima apertura e
+/// riportata in primo piano alle successive, invece di aprirne una ogni volta.
+enum FinestraAbout {
+    static var finestra: NSWindow?
+
+    static func mostra() {
+        if finestra == nil {
+            let w = NSWindow(
+                contentRect: .zero,
+                styleMask: [.titled, .closable, .fullSizeContentView],
+                backing: .buffered, defer: false)
+            w.titlebarAppearsTransparent = true
+            w.titleVisibility = .hidden
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: AboutView())
+            w.center()
+            finestra = w
+        }
+        finestra?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
 
 // ===================================================================== app
 @main
@@ -2284,12 +2446,7 @@ struct GlassApp: App {
             // Il pannello di sistema, con dentro i nostri crediti: la voce
             // "Informazioni su Vault" resta dov'è e fa quel che ci si aspetta.
             CommandGroup(replacing: .appInfo) {
-                Button("Informazioni su Vault") {
-                    NSApp.orderFrontStandardAboutPanel(options: [
-                        .credits: testoCrediti(),
-                    ])
-                    NSApp.activate(ignoringOtherApps: true)
-                }
+                Button("Informazioni su Vault") { FinestraAbout.mostra() }
             }
             CommandGroup(after: .appInfo) {
                 Button("Vault su GitHub") {
