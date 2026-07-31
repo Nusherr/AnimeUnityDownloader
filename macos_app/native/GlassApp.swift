@@ -2388,15 +2388,9 @@ struct AboutView: View {
             .help("github.com/Nusherr")
             .padding(.top, 16)
 
-            // L'attribuzione non è decorativa: Vault include tre progetti
-            // altrui sotto GPL-3.0, che la richiede. Sta in fondo e in
-            // piccolo, ma c'è.
-            Text("Costruita su VibraVid, AnimeUnity, MangaWorld e yt-dlp\nGPL-3.0")
-                .font(.caption2)
-                .foregroundStyle(.quaternary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 22)
+            // Qui non compaiono i progetti inclusi né la licenza: l'obbligo
+            // di attribuzione della GPL-3.0 è assolto dal file LICENSE, che
+            // viene copiato dentro l'app, e dai crediti nel README.
         }
         .padding(.horizontal, 34)
         .padding(.vertical, 30)
