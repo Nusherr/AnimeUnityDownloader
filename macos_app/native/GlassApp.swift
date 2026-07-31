@@ -172,6 +172,72 @@ final class AppModel: ObservableObject {
     func rimuoviDallaCoda(_ id: Int) { Task { await post("/queue_remove", ["id": id]) } }
     func clearCompleted() { Task { await post("/clear_completed", [:]) } }
 
+    /// Avvisa che l'app è cambiata versione dall'ultima volta che è stata
+    /// aperta, e lo dice una volta sola.
+    ///
+    /// Dopo un aggiornamento l'app si riavvia da sé, e senza un cenno
+    /// sembrerebbe solo essersi chiusa e riaperta da sola. Il confronto è fra
+    /// il tag inciso nel pacchetto e quello segnato all'ultimo avvio, quindi
+    /// funziona anche per chi sostituisce l'app a mano.
+    func segnalaVersioneCambiata() {
+        let attuale = (Bundle.main.object(forInfoDictionaryKey: "VaultRilascio")
+                       as? String) ?? ""
+        guard !attuale.isEmpty else { return }
+
+        let cartella = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Vault")
+        let segno = cartella.appendingPathComponent(".vault-versione-vista")
+        let visto = (try? String(contentsOf: segno, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try? FileManager.default.createDirectory(
+            at: cartella, withIntermediateDirectories: true)
+        try? attuale.write(to: segno, atomically: true, encoding: .utf8)
+
+        // Primo avvio in assoluto: si prende nota e si tace. Annunciare un
+        // aggiornamento a chi ha appena installato l'app sarebbe una bugia.
+        guard let visto, !visto.isEmpty, visto != attuale else { return }
+
+        // Non subito: durante l'avvio la finestra non è ancora pronta e un
+        // pannello modale aperto lì viene ingoiato senza comparire.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            let a = NSAlert()
+            a.messageText = "Vault è stata aggiornata"
+            a.informativeText = "Ora stai usando la versione \(attuale)."
+            a.addButton(withTitle: "Vai")
+            a.addButton(withTitle: "Cosa è cambiato")
+            if a.runModal() == .alertSecondButtonReturn,
+               let u = URL(string:
+                    "https://github.com/Nusherr/Vault/releases/tag/\(attuale)") {
+                NSWorkspace.shared.open(u)
+            }
+        }
+    }
+
+    /// Ripulisce le note di rilascio dal Markdown.
+    ///
+    /// Su GitHub si scrivono con asterischi e trattini, ma un pannello di
+    /// avviso di macOS mostra testo semplice: senza questo passaggio si legge
+    /// "**Novità principali**" e "- voce" invece del grassetto e dei punti.
+    func ripulisciNote(_ testo: String) -> String {
+        var righe: [String] = []
+        for riga in testo.components(separatedBy: .newlines) {
+            var r = riga.trimmingCharacters(in: .whitespaces)
+            r = r.replacingOccurrences(of: "**", with: "")
+                 .replacingOccurrences(of: "`", with: "")
+            while r.hasPrefix("#") { r.removeFirst() }
+            r = r.trimmingCharacters(in: .whitespaces)
+            if r.hasPrefix("- ") || r.hasPrefix("* ") {
+                r = "•  " + r.dropFirst(2)
+            }
+            righe.append(r)
+        }
+        return righe.joined(separator: "\n")
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Cerca una versione nuova di Vault e, se c'è, propone di installarla.
     ///
     /// - Parameter automatico: true quando parte da sé dopo il controllo in
@@ -197,13 +263,26 @@ final class AppModel: ObservableObject {
 
             let tag = (obj["tag"] as? String) ?? ""
             let note = (obj["note"] as? String) ?? ""
+            let pulite = ripulisciNote(note)
             let scelta = NSAlert()
             scelta.messageText = "Disponibile la versione \(tag)"
-            scelta.informativeText = note.isEmpty
-                ? "Vault può aggiornarsi e riavviarsi da sola."
-                : note
+            scelta.informativeText = "Vault può scaricarla e riavviarsi da sola."
             scelta.addButton(withTitle: "Aggiorna e riavvia")
             scelta.addButton(withTitle: "Più tardi")
+            // Le note stanno in un riquadro che scorre, non nel testo del
+            // pannello: sono lunghe quanto vuoi e non deformano l'avviso.
+            if !pulite.isEmpty {
+                let testo = NSTextView(frame: NSRect(x: 0, y: 0, width: 380, height: 150))
+                testo.string = pulite
+                testo.isEditable = false
+                testo.drawsBackground = false
+                testo.font = .systemFont(ofSize: 11)
+                let scorri = NSScrollView(frame: NSRect(x: 0, y: 0, width: 380, height: 150))
+                scorri.documentView = testo
+                scorri.hasVerticalScroller = true
+                scorri.drawsBackground = false
+                scelta.accessoryView = scorri
+            }
             guard scelta.runModal() == .alertFirstButtonReturn else { return }
 
             FinestraAvanzamento.mostra("Scarico la versione \(tag)…")
@@ -647,7 +726,10 @@ struct ContentView: View {
                 .padding(.bottom, 8)
         }
         .animation(.snappy, value: model.state.running)
-        .onAppear { model.start() }
+        .onAppear {
+            model.start()
+            model.segnalaVersioneCambiata()
+        }
         // Il controllo gira in sottofondo nel motore; qui si intercetta il
         // momento in cui trova qualcosa, una volta sola per sessione: chi
         // risponde "più tardi" non deve rivederlo a ogni battito dello stato.
