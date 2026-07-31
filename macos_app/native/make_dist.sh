@@ -64,15 +64,23 @@ rm -rf "$STAGE/mangaworld-tmp/.git" "$STAGE/mangaworld-tmp/.github" \
 mv "$STAGE/mangaworld-tmp" "$APP/Contents/Resources/mangaworld"
 
 echo "▸ Installo le dipendenze (progetto + VibraVid + MangaWorld) nello stesso Python"
+# Un file alla volta, non tutti insieme. I tre progetti fissano versioni
+# esatte e a volte discordi della stessa libreria — VibraVid vuole
+# beautifulsoup4==4.14.3, MangaWorld ==4.15.0 — e pip, ricevendoli in un'unica
+# invocazione, si ferma con "ResolutionImpossible" senza installare nulla.
+# Risolvendoli uno per uno vince l'ultimo, e sono versioni compatibili fra
+# loro: quel che conta è che il pacchetto venga prodotto.
+#
 # brotlicffi non è nei requirements di MangaWorld ma senza non funziona nulla:
 # mangaworld.ac risponde in Brotli e aiohttp, col pacchetto Brotli di Google,
 # chiama process(data, max_length) su un'API che accetta un argomento solo.
 # Fallisce con "Can not decode content-encoding: br" a ogni download.
-"$PY" -m pip install --quiet --disable-pip-version-check \
-  -r "$PROGETTO/requirements.txt" \
-  -r "$APP/Contents/Resources/vibravid/requirements.txt" \
-  -r "$APP/Contents/Resources/mangaworld/requirements.txt" \
-  brotlicffi
+for REQ in "$PROGETTO/requirements.txt" \
+           "$APP/Contents/Resources/vibravid/requirements.txt" \
+           "$APP/Contents/Resources/mangaworld/requirements.txt"; do
+  "$PY" -m pip install --quiet --disable-pip-version-check -r "$REQ"
+done
+"$PY" -m pip install --quiet --disable-pip-version-check brotlicffi
 
 echo "▸ Alleggerisco il pacchetto"
 find "$APP/Contents/Resources" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
