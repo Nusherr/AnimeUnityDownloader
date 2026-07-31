@@ -859,7 +859,10 @@ def download_mangaworld(
         # Qui l'unità sono i capitoli, non gli episodi né le tracce.
         state.overall = {
             "label": titolo, "total": attesi, "done": 0,
-            "stage": "Leggo l'elenco dei capitoli…", "unit": "capitoli",
+            # "Leggo l'elenco dei capitoli" era vero ma sembrava sbagliato a
+            # chi ne aveva chiesto uno solo: ora dice quel che sta facendo
+            # davvero, cioè preparare proprio quelli scelti.
+            "stage": "Preparo i capitoli scelti…", "unit": "capitoli",
         }
         state.tasks = {}
         state.speed_bps = 0.0

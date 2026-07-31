@@ -41,6 +41,25 @@ def _prepara_percorso(progetto: Path) -> None:
     sys.path.insert(0, str(progetto))
 
 
+def _capitoli_dal_soup(soup) -> list[str]:  # noqa: ANN001
+    """Indirizzi dei capitoli, ricavati dalla sola pagina del manga.
+
+    Il loro ``extract_chapters_info`` fa la stessa cosa ma aprendo la pagina di
+    **ogni** capitolo per contarne le immagini: su One Piece Digital Colored
+    Comics sono 1076 richieste solo per sapere quali capitoli esistono. Qui
+    l'elenco si legge dall'HTML che abbiamo già in mano, e le pagine si contano
+    dopo, per i soli capitoli chiesti.
+
+    L'ordine è invertito come fanno loro: nel sito i capitoli sono elencati
+    dall'ultimo al primo.
+    """
+    voci = [
+        a["href"] for a in soup.find_all("a", {"class": "chap", "title": True})
+        if "/read/" in (a.get("href") or "")
+    ]
+    return voci[::-1]
+
+
 def _numeri(elenco: str) -> list[int]:
     """Numeri di capitolo da una stringa tipo "3, 7, 12", in ordine e senza doppioni."""
     visti: list[int] = []
@@ -177,26 +196,54 @@ def main() -> int:
 
     from manga_downloader import download_chapter_with_progress
     from src.crawler_utils import (
-        extract_chapters_info,
-        extract_download_links,
         extract_manga_type,
+        fetch_chapter_data,
+        fetch_download_link,
     )
     from src.general_utils import validate_index_range
+
+    async def prepara(capitoli: list[str], voluti: list[int], tipo: str) -> tuple:
+        """Link e numero di pagine dei soli capitoli chiesti.
+
+        Due richieste per capitolo invece di due per l'intero manga: chiedendo
+        un capitolo di One Piece si passa da oltre duemila pagine caricate a
+        due, ed è la ragione per cui prima restava fermo così a lungo.
+        """
+        import re
+
+        import aiohttp
+
+        from src.config import FIRST_PAGE_SUFFIX_REGEX
+
+        async with aiohttp.ClientSession() as sessione:
+            dati = await asyncio.gather(
+                *[fetch_chapter_data(capitoli[i], sessione) for i in voluti])
+            grezzi = await asyncio.gather(
+                *[fetch_download_link(capitoli[i], sessione, manga_type=tipo)
+                  for i in voluti])
+
+        # Un capitolo senza link non è scaricabile: si scarta insieme al suo
+        # conteggio pagine, o le due liste finirebbero disallineate e le pagine
+        # di un capitolo verrebbero attribuite a un altro.
+        link, pagine = [], []
+        for indirizzo, (_, quante) in zip(grezzi, dati):
+            if not indirizzo:
+                continue
+            link.append(re.sub(FIRST_PAGE_SUFFIX_REGEX, "", indirizzo))
+            pagine.append(quante)
+        return link, pagine
 
     async def esegui() -> None:
         _, nome, slug = extract_manga_info(args.url)
         soup = await fetch_page(args.url)
         tipo = extract_manga_type(soup, slug)
 
-        capitoli, pagine = await extract_chapters_info(soup)
+        capitoli = _capitoli_dal_soup(soup)
         if not capitoli:
             sys.stderr.write("Nessun capitolo trovato a questo indirizzo.\n")
             return
 
         if args.capitoli:
-            # Capitoli sparsi: si prendono i link di tutti — extract_download_links
-            # li richiede comunque tutti prima di affettare, quindi non costa
-            # nulla in più — e si tengono solo quelli chiesti.
             voluti = [
                 n - 1 for n in _numeri(args.capitoli)
                 if 1 <= n <= len(capitoli)
@@ -204,16 +251,14 @@ def main() -> int:
             if not voluti:
                 sys.stderr.write("Nessuno dei capitoli indicati esiste.\n")
                 return
-            tutti = await extract_download_links(capitoli, 0, len(capitoli), tipo)
-            link = [tutti[i] for i in voluti if i < len(tutti)]
-            pag = [pagine[i] for i in voluti if i < len(pagine)]
         else:
             inizio, fine = validate_index_range(args.start, args.end, len(capitoli))
-            link = await extract_download_links(capitoli, inizio, fine, tipo)
-            # Qui la correzione: le pagine si affettano con gli stessi indici
-            # con cui sono stati raccolti i link, non con quelli grezzi.
-            pag = pagine[inizio:fine]
             voluti = list(range(inizio, fine))
+
+        link, pag = await prepara(capitoli, voluti, tipo)
+        if not link:
+            sys.stderr.write("Non sono riuscito a leggere i capitoli scelti.\n")
+            return
 
         # Le immagini si scaricano sempre senza chiedere la generazione dei
         # comic: ci pensa _genera_comic subito dopo. Vedi lì il perché.
