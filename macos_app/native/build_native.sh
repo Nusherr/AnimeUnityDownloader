@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 # È il numero su cui l'app decide se esiste un aggiornamento, ed è separato
 # dalla versione mostrata all'utente: quella resta 1.0 anche pubblicando
 # v1.0.5, v1.0.6 e così via. Va alzato PRIMA di costruire il DMG da pubblicare.
-RILASCIO="v1.0"
+RILASCIO="v1.0.1"
 
 PROGETTO="$(cd ../.. && pwd)"          # cartella che contiene gui.py
 APP="/Applications/Vault.app"
