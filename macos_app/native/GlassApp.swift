@@ -157,6 +157,30 @@ final class AppModel: ObservableObject {
     func cancel() { Task { await post("/cancel", [:]) } }
     func rimuoviDallaCoda(_ id: Int) { Task { await post("/queue_remove", ["id": id]) } }
     func clearCompleted() { Task { await post("/clear_completed", [:]) } }
+
+    /// Cerca subito una versione nuova di yt-dlp e dice com'è andata.
+    /// L'esito va detto: chi lo chiede lo fa perché qualcosa non funziona, e
+    /// un comando che non risponde nulla lascia nel dubbio.
+    func aggiornaYtdlp() {
+        Task {
+            let obj = await post("/ytdlp_update", [:])
+            let avviso = NSAlert()
+            if let err = obj["error"] as? String {
+                avviso.messageText = "Controllo non riuscito"
+                avviso.informativeText = err
+            } else if obj["aggiornato"] as? Bool == true {
+                avviso.messageText = "yt-dlp aggiornato"
+                avviso.informativeText = "Dalla versione "
+                    + "\((obj["da"] as? String) ?? "?") alla "
+                    + "\((obj["a"] as? String) ?? "?")."
+            } else {
+                avviso.messageText = "yt-dlp è già aggiornato"
+                avviso.informativeText = "Versione "
+                    + "\((obj["versione"] as? String) ?? "in uso")."
+            }
+            avviso.runModal()
+        }
+    }
     func openDestination() { Task { await post("/open_folder", ["path": destination]) } }
     func open(path: String) { Task { await post("/open_path", ["path": path]) } }
 
@@ -2443,6 +2467,12 @@ struct GlassApp: App {
                 Button("Informazioni su Vault") { FinestraAbout.mostra() }
             }
             CommandGroup(after: .appInfo) {
+                // Il controllo avviene comunque da solo una volta al giorno;
+                // questa voce serve a chi non vuole aspettare, tipicamente
+                // quando un sito ha smesso di funzionare.
+                Button("Controlla aggiornamenti di yt-dlp") {
+                    AppModel.shared.aggiornaYtdlp()
+                }
                 Button("Vault su GitHub") {
                     if let u = URL(string: "https://github.com/Nusherr/Vault") {
                         NSWorkspace.shared.open(u)

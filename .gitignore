@@ -185,3 +185,7 @@ macos_app/native/dist/
 
 # Cronologia dei download: dati dell'utente, non codice.
 cronologia.json
+
+# Binari aggiornati a runtime: dati, non codice.
+aggiornamenti/
+.ytdlp-controllo

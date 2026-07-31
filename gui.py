@@ -50,9 +50,11 @@ from src.general_utils import fetch_page, fetch_page_httpx
 try:
     from ytdlp_downloads import (
         QUALITY_LABELS,
+        aggiorna_ytdlp,
         fetch_title,
         list_formats,
         run_ytdlp_download,
+        versione_ytdlp,
         ytdlp_available,
     )
     from ytdlp_downloads import _Cancelled as YtdlpCancelled
@@ -61,6 +63,12 @@ except Exception:  # noqa: BLE001
 
     def ytdlp_available() -> bool:
         return False
+
+    def aggiorna_ytdlp(*, forza: bool = False) -> dict:  # noqa: ARG001
+        return {"error": "Funzione non disponibile."}
+
+    def versione_ytdlp() -> str:
+        return ""
 
     def list_formats(url: str) -> str:  # noqa: ARG001
         return ""
@@ -1270,6 +1278,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self._handle_ytdlp(data))
             elif path == "/ytdlp_formats":
                 self._json(self._handle_ytdlp_formats(data))
+            elif path == "/ytdlp_update":
+                # Richiesto a mano: si controlla comunque, senza aspettare
+                # che sia passato un giorno dall'ultima volta.
+                esito = aggiorna_ytdlp(forza=True)
+                if esito.get("aggiornato"):
+                    STATE.log(f"⬆️ yt-dlp aggiornato: {esito.get('da')} "
+                              f"→ {esito.get('a')}")
+                esito["versione"] = versione_ytdlp()
+                self._json(esito)
             elif path == "/mangaworld":
                 self._json(self._handle_mangaworld(data))
             elif path == "/mangaworld_info":
@@ -1629,6 +1646,25 @@ def pick_folder() -> str:
         return ""
 
 
+def controlla_aggiornamenti() -> None:
+    """Cerca una versione nuova di yt-dlp, in sottofondo e senza disturbare.
+
+    Parte poco dopo l'avvio, non subito: all'apertura l'app ha già da fare, e
+    questo può aspettare qualche secondo. Se GitHub non risponde non succede
+    nulla — si continua con il binario che c'è.
+
+    Il controllo vero è limitato a una volta al giorno da aggiorna_ytdlp(): a
+    ogni avvio sarebbe una richiesta ogni volta che si apre l'app, e yt-dlp
+    esce all'incirca una volta a settimana.
+    """
+    time.sleep(8)
+    if not ytdlp_available():
+        return
+    esito = aggiorna_ytdlp()
+    if esito.get("aggiornato"):
+        STATE.log(f"⬆️ yt-dlp aggiornato: {esito.get('da')} → {esito.get('a')}")
+
+
 def idle_watchdog() -> None:
     """Chiude il programma se la pagina è chiusa da tempo e non scarica nulla."""
     while True:
@@ -1656,6 +1692,10 @@ def main() -> None:
 
     STATE.log("Pronto. Incolla un link e premi Scarica.")
     threading.Thread(target=speed_sampler, daemon=True).start()
+    # Fuori dal ramo del browser: quel blocco vale solo per l'uso da terminale,
+    # e l'app nativa imposta GUI_NO_BROWSER — l'aggiornamento non sarebbe mai
+    # partito proprio dove serve.
+    threading.Thread(target=controlla_aggiornamenti, daemon=True).start()
     if not os.environ.get("GUI_NO_BROWSER"):
         threading.Thread(target=idle_watchdog, daemon=True).start()
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
